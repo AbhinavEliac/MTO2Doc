@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables & secrets (Never commit API keys!)
+.env
+.env.local
+.env.*
+!.env.example
+
+# Python virtual environments
+pid_env/
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Runtime outputs & temporary uploaded files
+uploads/
+outputs/
+rasterized/
+*.log
+install_log.txt
+
+# Scratch & debug scripts
+debug_*.py
+scratch/
+
+# OS and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+.claude/
