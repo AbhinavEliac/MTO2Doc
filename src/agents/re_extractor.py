@@ -61,9 +61,23 @@ class ReExtractorAgent(BaseAgent):
                 time.sleep(3)
                 
             # Execute Gemini Vision crop extraction
-            use_mocks = state.get("use_mocks", True)
+            use_mocks = state.get("use_mocks", False)
             local_mode = state.get("local_mode", False)
-            re_extracted_items = self._extract_from_crop(crop_path, item, use_mocks, local_mode)
+            provider = state.get("llm_provider")
+            model_name = state.get("llm_model")
+            api_key = state.get("llm_api_key")
+            base_url = state.get("llm_base_url")
+
+            re_extracted_items = self._extract_from_crop(
+                crop_path=crop_path,
+                missing_item=item,
+                use_mocks=use_mocks,
+                local_mode=local_mode,
+                provider=provider,
+                model_name=model_name,
+                api_key=api_key,
+                base_url=base_url,
+            )
 
             
             # Process and map back to state entities
@@ -111,7 +125,17 @@ class ReExtractorAgent(BaseAgent):
             }]
         }
 
-    def _extract_from_crop(self, crop_path: Optional[str], missing_item: Dict, use_mocks: bool = True, local_mode: bool = False) -> List[ReExtractedItem]:
+    def _extract_from_crop(
+        self,
+        crop_path: Optional[str],
+        missing_item: Dict,
+        use_mocks: bool = False,
+        local_mode: bool = False,
+        provider: Optional[str] = None,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> List[ReExtractedItem]:
         """
         Calls Gemini Vision (or local PaddleOCR in local_mode) on the cropped image file.
         """
@@ -163,7 +187,11 @@ class ReExtractorAgent(BaseAgent):
                         schema=ReExtractionPayload,
                         prompt=prompt,
                         system_instruction=system_instruction,
-                        image_path=crop_path
+                        image_path=crop_path,
+                        provider=provider,
+                        model_name=model_name,
+                        api_key=api_key,
+                        base_url=base_url,
                     )
                     return result.items
                 except Exception as e:

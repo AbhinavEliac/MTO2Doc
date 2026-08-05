@@ -76,37 +76,17 @@ class CompilerAgent(BaseAgent):
         # Always compile annotations (notes, elevations, ratings)
         graph.annotations = self._compile_annotations(text_elements)
 
-        # Drawing-type dispatch
-        if drawing_type in ('PID', 'PFD', 'ISOMETRIC'):
-            graph.equipment = self._compile_equipment(text_elements, symbols)
-            graph.lines = self._compile_lines(text_elements, geometry, relations)
-            graph.instruments = self._compile_instruments(text_elements, symbols)
-            graph.valves = self._compile_valves(text_elements, symbols, relations, graph.lines)
-            graph.safety_relief_valves = self._compile_safety_relief_valves(text_elements, symbols)
-
-        elif drawing_type == 'ELECTRICAL_LAYOUT':
-            graph.luminaires = self._compile_luminaires(text_elements, symbols)
-            graph.panels = self._compile_panels(text_elements, symbols)
-            graph.cables = self._compile_cables(text_elements, symbols, relations)
-            graph.equipment = self._compile_equipment(text_elements, symbols)
-
-        elif drawing_type == 'EARTHING_LAYOUT':
-            graph.earthing_components = self._compile_earthing(text_elements, symbols)
-            graph.equipment = self._compile_equipment(text_elements, symbols)
-
-        elif drawing_type == 'SLD':
-            graph.panels = self._compile_panels(text_elements, symbols)
-            graph.cables = self._compile_cables(text_elements, symbols, relations)
-            graph.equipment = self._compile_equipment(text_elements, symbols)
-
-        elif drawing_type == 'CABLE_SCHEDULE':
-            graph.cables = self._compile_cables(text_elements, symbols, relations)
-            graph.panels = self._compile_panels(text_elements, symbols)
-
-        else:
-            # HVAC_LAYOUT, STRUCTURAL_LAYOUT, GENERIC, and anything else
-            graph.equipment = self._compile_equipment(text_elements, symbols)
-            graph.generic_components = self._compile_generic(text_elements, symbols)
+        # Universal compilation across all detected entity types
+        graph.equipment = self._compile_equipment(text_elements, symbols)
+        graph.lines = self._compile_lines(text_elements, geometry, relations)
+        graph.instruments = self._compile_instruments(text_elements, symbols)
+        graph.valves = self._compile_valves(text_elements, symbols, relations, graph.lines)
+        graph.safety_relief_valves = self._compile_safety_relief_valves(text_elements, symbols)
+        graph.luminaires = self._compile_luminaires(text_elements, symbols)
+        graph.panels = self._compile_panels(text_elements, symbols)
+        graph.cables = self._compile_cables(text_elements, symbols, relations)
+        graph.earthing_components = self._compile_earthing(text_elements, symbols)
+        graph.generic_components = self._compile_generic(text_elements, symbols)
 
         total = graph.total_items
         logger.info(
@@ -160,19 +140,47 @@ class CompilerAgent(BaseAgent):
 
         for lt in line_tags:
             tag = lt["tag"]
-            # Parse line tag components (e.g. 8"-PV-26-9035-FC11S-08)
-            pattern = r'^(\d+(?:\.\d+)?\"?)-([A-Z]+)-(\d+)-(\d+)-([A-Z0-9]+)(?:-([A-Z0-9]+))?'
-            match = re.match(pattern, tag)
+            # Intelligently split tag and detect whether size prefix is present
+            parts = [p.strip() for p in tag.split('-') if p.strip()]
 
-            if match:
-                size, service, system, sequence, spec, insulation = match.groups()
+            is_size = False
+            if parts:
+                p0 = parts[0]
+                if re.match(r'^\d', p0) or '"' in p0 or "'" in p0 or 'IN' in p0.upper() or 'MM' in p0.upper() or 'DN' in p0.upper():
+                    is_size = True
+
+            if is_size and len(parts) >= 2:
+                size = parts[0]
+                rem = parts[1:]
             else:
-                parts = tag.split('-')
-                size = parts[0] if parts else '1"'
-                service = parts[1] if len(parts) > 1 else 'UNK'
-                spec = parts[-2] if len(parts) > 3 else 'UNSPEC'
-                sequence = parts[-1] if len(parts) > 2 else '0000'
-                insulation = None
+                size = ""
+                rem = parts
+
+            service = rem[0] if len(rem) > 0 else "UNK"
+            system = None
+            sequence = "0000"
+            spec = "UNSPEC"
+            insulation = None
+
+            if len(rem) == 2:
+                sequence = rem[1]
+            elif len(rem) == 3:
+                sequence = rem[1]
+                spec = rem[2]
+            elif len(rem) == 4:
+                if rem[1].isdigit() and len(rem[1]) <= 3:
+                    system = rem[1]
+                    sequence = rem[2]
+                    spec = rem[3]
+                else:
+                    sequence = rem[1]
+                    spec = rem[2]
+                    insulation = rem[3]
+            elif len(rem) >= 5:
+                system = rem[1]
+                sequence = rem[2]
+                spec = rem[3]
+                insulation = rem[4]
 
             path_coords = None
             for trace in geom.get("traces", []):
@@ -401,7 +409,7 @@ class CompilerAgent(BaseAgent):
         self, texts: List[Dict], symbols: List[Dict], relations: List[Dict]
     ) -> List[CableItem]:
         compiled = []
-        items = [t for t in texts if t["classification"] == "CIRCUIT_TAG"]
+        items = [t for t in texts if t["classification"] in ("CIRCUIT_TAG", "CABLE_TAG")]
 
         for item in items:
             tag = item["tag"]

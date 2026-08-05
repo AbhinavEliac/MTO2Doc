@@ -56,14 +56,13 @@ class CompletenessAgent(BaseAgent):
         # 2. Heuristic check: Check if there's a high pressure valve near PIT-9055 (loop 9055) 
         # that might have been skipped in text detection (e.g. check valve in loop 9055).
         # We simulate finding a suspect region in B9 on the first pass.
+        use_mocks = state.get("use_mocks", False)
         re_extraction_count = state.get("re_extraction_count", 0)
         
-        if re_extraction_count == 0:
+        if use_mocks and re_extraction_count == 0:
             target = "26CB9131"
             if target not in re_extracted_targets:
-                # Let's intentionally inject a missing check valve "26CB9131" in grid B9
-                # to demonstrate the Focused Re-Extraction and Merge Loop!
-                logger.info("First run: Flagging check valve 26CB9131 in grid B9 as missing.")
+                logger.info("Demo Mock mode: Flagging check valve 26CB9131 in grid B9 as missing for re-extraction demo.")
                 missing.append({
                     "item_type": "CHECK_VALVE",
                     "target_tag": target,

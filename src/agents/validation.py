@@ -81,14 +81,16 @@ class ValidationAgent(BaseAgent):
                     "message": f"Orphan instrument: Instrument '{inst.tag}' has no logical connections to lines or equipment."
                 })
 
-        # Rule 4: Verify equipment naming convention format (must start with system prefix, e.g., '26-')
+        # Rule 4: Verify equipment naming convention format (e.g. system prefix '26-' or standard code 'TK-101', 'P-101')
+        import re
+        equip_pattern = re.compile(r'^(\d{2}-|[A-Z]{1,4}-?\d+)', re.IGNORECASE)
         for eq in graph.equipment:
-            if not eq.tag.startswith("26-") and not eq.tag.startswith("40-") and not eq.tag.startswith("63-"):
+            if not equip_pattern.match(eq.tag):
                 reports.append({
                     "rule_id": "VAL-005",
                     "severity": "WARNING",
                     "target_tag": eq.tag,
-                    "message": f"Equipment tag '{eq.tag}' does not start with a standard system code prefix."
+                    "message": f"Equipment tag '{eq.tag}' does not match standard engineering equipment tag format."
                 })
 
         logger.info(f"Validation complete. Identified {len(reports)} inconsistencies.")

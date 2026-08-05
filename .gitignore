@@ -23,6 +23,8 @@ uploads/
 outputs/
 rasterized/
 *.log
+*.db
+extraction_history.db
 install_log.txt
 
 # Scratch & debug scripts
