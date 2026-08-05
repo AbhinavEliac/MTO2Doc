@@ -275,8 +275,8 @@ class TextDetectionAgent(BaseAgent):
             except Exception as pdf_err:
                 logger.warning(f"PyMuPDF vector text extraction failed ({pdf_err}).")
 
-        # Option B: Local PaddleOCR
-        if not ocr_items and ocr_engine in ("paddle", "pdf_text", "got-ocr", "local"):
+        # Option B: Local PaddleOCR (serves as spatial OCR baseline for Online Layer 2)
+        if not ocr_items or ocr_engine in ("paddle", "pdf_text", "got-ocr", "local"):
             try:
                 from src.utils.preprocess import preprocess_for_ocr
                 from src.utils.paddle_ocr import run_paddle_ocr
@@ -289,37 +289,39 @@ class TextDetectionAgent(BaseAgent):
             except Exception as paddle_err:
                 logger.warning(f"Local PaddleOCR extraction failed ({paddle_err}).")
 
-        # Option C: Online Gemini Vision / Qwen 2.5-VL OCR
-        if not ocr_items or ocr_engine in ("gemini_ocr", "qwen_ocr", "online_ocr"):
+        # Option C: Online Gemini Vision / Qwen 2.5-VL / Qwen 3.7-VL OCR
+        if ocr_engine in ("gemini_ocr", "qwen_ocr", "qwen_37_ocr", "online_ocr"):
             logger.info(f"Layer 1: Running Online Vision OCR ({ocr_engine})...")
             try:
                 prompt_ocr = (
                     "Extract all text labels, tag numbers, coordinates, and notes visible on this drawing.\n"
-                    "Return a JSON list of items with text, confidence, and pos_x, pos_y."
+                    "Return a clean list of text items found on the drawing."
                 )
                 raw_ocr_res = self.invoke_text(
                     prompt=prompt_ocr,
                     image_path=raw_image,
-                    provider="qwen" if ocr_engine == "qwen_ocr" else "gemini",
+                    provider="qwen" if ocr_engine in ("qwen_ocr", "qwen_37_ocr") else "gemini",
                     model_name=llm_model,
                     api_key=llm_api_key,
                     base_url=llm_base_url,
                 )
-                # Parse fallback
                 logger.info("Layer 1 Online OCR response received.")
+                if raw_ocr_res and not ocr_items:
+                    lines = [l.strip() for l in raw_ocr_res.splitlines() if l.strip()]
+                    ocr_items = [{"text": line, "confidence": 0.9, "box": [0.5, 0.5, 0.5, 0.5]} for line in lines]
             except Exception as online_ocr_err:
                 logger.warning(f"Online OCR engine failed ({online_ocr_err}).")
 
         # ── LAYER 2: REASONING & STRUCTURING ENGINE ───────────────────────────
 
         # Option A: Rule-Based Classifier (Local Offline Regex)
-        if reasoning_engine == "rule_based" or (local_mode and reasoning_engine not in ("qwen", "gemini", "openai")):
+        if reasoning_engine == "rule_based" or (local_mode and reasoning_engine not in ("qwen", "qwen_37", "gemini", "openai")):
             logger.info("Layer 2: Executing Local Rule-Based Classifier (zero LLM tokens)...")
             structured = classify_paddle_results(ocr_items, drawing_type=drawing_type)
             logger.info(f"Layer 2: Rule-based classifier produced {len(structured)} structured items.")
             return {"extracted_entities": {"text_elements": structured}}
 
-        # Option B: Online LLM Deep Reasoning Engine (Qwen 2.5, Gemini, OpenAI, etc.)
+        # Option B: Online LLM Deep Reasoning Engine (Qwen 2.5, Qwen 3.7, Gemini, OpenAI, etc.)
         logger.info(f"Layer 2: Executing Online LLM Reasoning Engine using provider '{llm_provider}'...")
         try:
             from src.utils.paddle_ocr import format_paddle_results_for_llm
@@ -335,7 +337,7 @@ class TextDetectionAgent(BaseAgent):
                 "1. FIX OCR TYPOS: Correct misread letters/digits (e.g., P1T-9055 -> PIT-9055, 0B-01 -> DB-01, E8-01 -> EB-01).\n"
                 "2. RECOMBINE SPLIT TEXT: Re-assemble tags that were split across multiple OCR lines.\n"
                 "3. IDENTIFY MISPLACED DATA: Map nearby specifications (design pressure, design temp, wattage, rating, cable size, elevation, material, duty) into the parent tag's attributes dict.\n"
-                "4. FIND MISSING TAGS/ENTITIES: Infer missing tags or equipment referenced in callouts or note blocks.\n"
+                "4. FIND MISSING TAGS/ENTITIES: Visually inspect the drawing image to find any missing tags or equipment referenced in callouts or note blocks.\n"
                 "5. CLASSIFY & STRUCTURE: Map every entity into ONE of the following categories:\n"
                 + tag_categories + "\n"
                 "Return the cleaned, structured findings as a validated RawTextList JSON."
@@ -348,6 +350,7 @@ class TextDetectionAgent(BaseAgent):
                     "You are an AI engineering data reasoning engine. Your goal is to find missing data, "
                     "correct OCR errors, map misplaced attributes, and output clean structured JSON."
                 ),
+                image_path=raw_image,
                 provider=llm_provider,
                 model_name=llm_model,
                 api_key=llm_api_key,

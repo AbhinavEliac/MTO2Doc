@@ -9,6 +9,7 @@ import time
 import uuid
 import logging
 from datetime import datetime
+from typing import Dict, Any, List, Optional
 import streamlit as st
 import pandas as pd
 from PIL import Image
@@ -28,6 +29,16 @@ from src.thread_manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+def format_duration(seconds: Optional[float]) -> str:
+    if seconds is None or seconds <= 0:
+        return "N/A"
+    sec = int(seconds)
+    if sec < 60:
+        return f"{seconds:.1f}s"
+    m = sec // 60
+    s = sec % 60
+    return f"{m:02d}m {s:02d}s"
 
 # Initialize SQLite Database on app load
 init_db()
@@ -141,44 +152,6 @@ if "active_thread_id" not in st.session_state and all_threads:
     st.session_state["active_thread_id"] = all_threads[0]["thread_id"]
 
 # ─── Sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.markdown("## 🧵 Generation Threads")
-
-if all_threads:
-    for t in all_threads:
-        tid = t["thread_id"]
-        status = t["status"]
-        fname = t.get("filename", "Drawing")
-        dt_label = t.get("drawing_type", "GENERIC")
-        created = t.get("created_at", "")[:19].replace("T", " ")
-
-        status_icon = "🟢" if status == "COMPLETED" else "🔵" if status == "RUNNING" else "❌" if status == "FAILED" else "⛔"
-        prog_str = f" ({int(t.get('progress', 0)*100)}%)" if status == "RUNNING" else ""
-
-        col_t1, col_t2 = st.sidebar.columns([0.8, 0.2])
-        with col_t1:
-            button_label = f"{status_icon} {fname[:18]}...{prog_str}"
-            is_active = (st.session_state.get("active_thread_id") == tid)
-            if st.button(
-                button_label,
-                key=f"btn_thread_{tid}",
-                use_container_width=True,
-                type="primary" if is_active else "secondary",
-                help=f"Type: {dt_label} | Status: {status} | Created: {created}",
-            ):
-                st.session_state["active_thread_id"] = tid
-                st.rerun()
-
-        with col_t2:
-            if st.button("🗑️", key=f"del_thread_{tid}", help=f"Delete thread '{fname}' and its log"):
-                delete_thread(tid)
-                if st.session_state.get("active_thread_id") == tid:
-                    remaining = [x for x in all_threads if x["thread_id"] != tid]
-                    st.session_state["active_thread_id"] = remaining[0]["thread_id"] if remaining else None
-                st.rerun()
-else:
-    st.sidebar.info("No previous extraction threads found.")
-
-st.sidebar.markdown("---")
 st.sidebar.markdown("## ⚙️ 2-Layer Extraction Pipeline")
 
 max_retries = st.sidebar.slider(
@@ -195,6 +168,7 @@ ocr_option = st.sidebar.selectbox(
         "PyMuPDF Vector Text (Local / Offline)",
         "Gemini Vision OCR (Online API)",
         "Qwen 2.5-VL / Vision API (Online)",
+        "Qwen 3.7-VL / OpenRouter (Online)",
     ],
     index=0,
     help="Select the 1st layer OCR engine. PaddleOCR & PyMuPDF run locally offline.",
@@ -204,6 +178,7 @@ ocr_engine_map = {
     "PyMuPDF Vector Text (Local / Offline)": "pdf_text",
     "Gemini Vision OCR (Online API)": "gemini_ocr",
     "Qwen 2.5-VL / Vision API (Online)": "qwen_ocr",
+    "Qwen 3.7-VL / OpenRouter (Online)": "qwen_37_ocr",
 }
 ocr_engine = ocr_engine_map.get(ocr_option, "paddle")
 
@@ -213,6 +188,7 @@ reasoning_option = st.sidebar.selectbox(
     options=[
         "Rule-Based Regex Classifier (Local / Offline)",
         "Qwen 2.5 Reasoning Engine (OpenRouter / API)",
+        "Qwen 3.7 Reasoning Engine (OpenRouter / API)",
         "Gemini 2.0 Flash Engine (Online / API)",
         "OpenAI GPT-4o Engine (Online / API)",
     ],
@@ -222,6 +198,7 @@ reasoning_option = st.sidebar.selectbox(
 reasoning_engine_map = {
     "Rule-Based Regex Classifier (Local / Offline)": "rule_based",
     "Qwen 2.5 Reasoning Engine (OpenRouter / API)": "qwen",
+    "Qwen 3.7 Reasoning Engine (OpenRouter / API)": "qwen_37",
     "Gemini 2.0 Flash Engine (Online / API)": "gemini",
     "OpenAI GPT-4o Engine (Online / API)": "openai",
 }
@@ -232,8 +209,8 @@ llm_api_key = None
 llm_base_url = None
 llm_model = None
 
-if reasoning_engine in ("qwen", "openai") or ocr_engine == "qwen_ocr":
-    llm_provider = "qwen" if ("Qwen" in reasoning_option or ocr_engine == "qwen_ocr") else "openai"
+if reasoning_engine in ("qwen", "qwen_37", "openai") or ocr_engine in ("qwen_ocr", "qwen_37_ocr"):
+    llm_provider = "qwen" if ("Qwen" in reasoning_option or "qwen" in ocr_engine) else "openai"
     with st.sidebar.expander(f"🔧 {llm_provider.upper()} / OpenRouter Settings", expanded=True):
         default_key = os.getenv("OPENROUTER_API_KEY", os.getenv("QWEN_API_KEY", os.getenv("OPENAI_API_KEY", "")))
         llm_api_key = st.text_input(
@@ -248,11 +225,11 @@ if reasoning_engine in ("qwen", "openai") or ocr_engine == "qwen_ocr":
             value=default_endpoint,
             help="Custom endpoint URL (e.g. OpenRouter https://openrouter.ai/api/v1, DashScope, or local Ollama/vLLM)",
         )
-        default_model = os.getenv("QWEN_MODEL", "qwen/qwen-2.5-72b-instruct") if llm_provider == "qwen" else "gpt-4o"
+        default_model = "qwen/qwen-3.7-vl" if ("3.7" in ocr_option or "3.7" in reasoning_option) else os.getenv("QWEN_MODEL", "qwen/qwen-2.5-72b-instruct")
         llm_model = st.text_input(
             "Model Name",
             value=default_model,
-            help="Model identifier e.g. qwen/qwen-2.5-72b-instruct, qwen/qwen-2.5-coder-32b-instruct, qwen/qwen-2.5-vl-72b-instruct",
+            help="Model identifier e.g. qwen/qwen-3.7-vl, qwen/qwen-2.5-72b-instruct, qwen/qwen-2.5-vl-72b-instruct",
         )
 elif reasoning_engine == "gemini":
     llm_provider = "gemini"
@@ -272,6 +249,45 @@ local_mode = st.sidebar.checkbox(
 
 if local_mode:
     st.sidebar.info("🔌 Full Offline Mode forced — PaddleOCR + Regex Classifier. Zero API tokens.")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("## 🧵 Generation Threads")
+
+if all_threads:
+    with st.sidebar.container(height=260):
+        for t in all_threads:
+            tid = t["thread_id"]
+            status = t["status"]
+            fname = t.get("filename", "Drawing")
+            dt_label = t.get("drawing_type", "GENERIC")
+            created = t.get("created_at", "")[:19].replace("T", " ")
+
+            status_icon = "🟢" if status == "COMPLETED" else "🔵" if status == "RUNNING" else "❌" if status == "FAILED" else "⛔"
+            prog_str = f" ({int(t.get('progress', 0)*100)}%)" if status == "RUNNING" else ""
+
+            col_t1, col_t2 = st.columns([0.78, 0.22])
+            with col_t1:
+                button_label = f"{status_icon} {fname[:16]}...{prog_str}"
+                is_active = (st.session_state.get("active_thread_id") == tid)
+                if st.button(
+                    button_label,
+                    key=f"btn_thread_{tid}",
+                    use_container_width=True,
+                    type="primary" if is_active else "secondary",
+                    help=f"Type: {dt_label} | Status: {status} | Created: {created}",
+                ):
+                    st.session_state["active_thread_id"] = tid
+                    st.rerun()
+
+            with col_t2:
+                if st.button("🗑️", key=f"del_thread_{tid}", help=f"Delete thread '{fname}' and its log"):
+                    delete_thread(tid)
+                    if st.session_state.get("active_thread_id") == tid:
+                        remaining = [x for x in all_threads if x["thread_id"] != tid]
+                        st.session_state["active_thread_id"] = remaining[0]["thread_id"] if remaining else None
+                    st.rerun()
+else:
+    st.sidebar.info("No previous extraction threads found.")
 
 # ─── Main Content Tabs: Dashboard vs History ───────────────────────────────────
 tab_main_dashboard, tab_main_history = st.tabs([
@@ -375,10 +391,22 @@ with tab_main_dashboard:
             # ── Active Process & Progress Bar ─────────────────────────────────
             if status == "RUNNING" or status == "QUEUED":
                 st.markdown("<div class='section-header'>⚡ Active Subprocess Progress</div>", unsafe_allow_html=True)
+                
+                # Compute live duration
+                elapsed_sec = active_thread.get("duration_sec", 0.0) or 0.0
+                try:
+                    c_time = datetime.fromisoformat(active_thread.get("created_at"))
+                    elapsed_sec = (datetime.now() - c_time).total_seconds()
+                except Exception:
+                    pass
+
                 col_p1, col_p2 = st.columns([0.8, 0.2])
                 with col_p1:
                     st.progress(progress)
-                    st.info(f"⏳ **Active Subprocess:** `{current_step}` ({int(progress*100)}%) — File: *{fname}*")
+                    st.info(
+                        f"⏳ **Active Subprocess:** `{current_step}` ({int(progress*100)}%) — "
+                        f"⏱️ **Timer:** `{format_duration(elapsed_sec)}` — File: *{fname}*"
+                    )
                 with col_p2:
                     if st.button("🛑 Cancel Process", type="secondary", use_container_width=True):
                         cancel_extraction_thread(active_id)
@@ -429,7 +457,7 @@ with tab_main_dashboard:
 
                 # Metadata Block
                 st.markdown("<div class='section-header'>📋 Drawing Metadata</div>", unsafe_allow_html=True)
-                col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+                col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
                 with col_m1:
                     st.markdown(f"<div class='metric-card'><div class='metric-lbl'>Drawing Title</div><div class='metric-val'>{metadata.get('title', 'N/A')}</div></div>", unsafe_allow_html=True)
                 with col_m2:
@@ -440,6 +468,9 @@ with tab_main_dashboard:
                     st.markdown(f"<div class='metric-card'><div class='metric-lbl'>Discipline</div><div class='metric-val'>{metadata.get('discipline', 'N/A')}</div></div>", unsafe_allow_html=True)
                 with col_m5:
                     st.markdown(f"<div class='metric-card'><div class='metric-lbl'>Client</div><div class='metric-val'>{metadata.get('client_name', 'N/A')}</div></div>", unsafe_allow_html=True)
+                with col_m6:
+                    proc_time = format_duration(active_thread.get("duration_sec"))
+                    st.markdown(f"<div class='metric-card'><div class='metric-lbl'>Processing Time</div><div class='metric-val'>{proc_time}</div></div>", unsafe_allow_html=True)
 
                 # Extracted Data Tabs
                 if graph:
@@ -680,13 +711,16 @@ with tab_main_dashboard:
                     st.subheader("Consistency Errors & Warnings")
                     if reports:
                         for r in reports:
-                            icon = "❌" if r.get("severity") == "ERROR" else "⚠️"
-                            bg_color = "#FDF2F2" if r.get("severity") == "ERROR" else "#FEFBF0"
-                            border_color = "#F05252" if r.get("severity") == "ERROR" else "#FACA15"
+                            is_err = (r.get("severity") == "ERROR")
+                            icon = "❌" if is_err else "⚠️"
+                            bg_color = "#FDF2F2" if is_err else "#FEFBF0"
+                            border_color = "#F05252" if is_err else "#FACA15"
+                            title_color = "#7F1D1D" if is_err else "#713F12"
+                            msg_color = "#991B1B" if is_err else "#854D0E"
                             st.markdown(f"""
-                            <div style='background-color: {bg_color}; padding: 10px; border-left: 4px solid {border_color}; border-radius: 4px; margin-bottom: 8px;'>
-                                <strong>{icon} {r.get('rule_id', 'RULE')} (Target: {r.get('target_tag', 'N/A')})</strong><br/>
-                                <span style='font-size: 0.9rem;'>{r.get('message')}</span>
+                            <div style='background-color: {bg_color}; padding: 12px; border-left: 5px solid {border_color}; border-radius: 6px; margin-bottom: 10px; font-family: sans-serif;'>
+                                <strong style='color: {title_color}; font-size: 0.95rem;'>{icon} {r.get('rule_id', 'RULE')} (Target: {r.get('target_tag', 'N/A')})</strong><br/>
+                                <span style='font-size: 0.9rem; color: {msg_color}; line-height: 1.4; display: block; margin-top: 4px;'>{r.get('message')}</span>
                             </div>
                             """, unsafe_allow_html=True)
                     else:
@@ -783,6 +817,7 @@ with tab_main_history:
                 "Type": t.get("drawing_type"),
                 "Status": t.get("status"),
                 "Progress": f"{int(t.get('progress', 0)*100)}%",
+                "Duration": format_duration(t.get("duration_sec")),
                 "Step": t.get("current_step"),
                 "Created At": t.get("created_at", "")[:19].replace("T", " "),
             })

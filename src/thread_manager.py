@@ -94,12 +94,14 @@ def _run_workflow_worker(thread_id: str, initial_state: GraphState, cancel_event
     """
     Worker function executed in the background thread.
     """
+    start_time = time.time()
     logger.info(f"Background worker started for thread '{thread_id}'")
     update_thread_status(
         thread_id=thread_id,
         status="RUNNING",
         progress=0.10,
         current_step="Initializing Workflow Graph",
+        duration_sec=0.0,
     )
     add_log(thread_id, "Pipeline Started", "Initialized workflow state graph.")
 
@@ -126,6 +128,7 @@ def _run_workflow_worker(thread_id: str, initial_state: GraphState, cancel_event
         current_state = dict(initial_state)
 
         for output in app.stream(initial_state):
+            elapsed = round(time.time() - start_time, 1)
             if cancel_event.is_set():
                 logger.info(f"Cancellation detected for thread '{thread_id}'")
                 update_thread_status(
@@ -134,6 +137,7 @@ def _run_workflow_worker(thread_id: str, initial_state: GraphState, cancel_event
                     progress=1.0,
                     current_step="Cancelled by User",
                     error_message="Process was manually interrupted by user.",
+                    duration_sec=elapsed,
                 )
                 add_log(thread_id, "Cancellation", "Process execution cancelled by user.", log_level="WARNING")
                 return
@@ -156,12 +160,14 @@ def _run_workflow_worker(thread_id: str, initial_state: GraphState, cancel_event
                     current_step=desc,
                     drawing_type=dt,
                     discipline=disc,
+                    duration_sec=elapsed,
                 )
                 add_log(thread_id, node_name.replace("_", " ").title(), f"Completed stage: {desc}")
 
         if cancel_event.is_set():
             return
 
+        final_duration = round(time.time() - start_time, 1)
         final_meta = current_state.get("metadata", {})
         final_graph = current_state.get("engineering_graph")
 
@@ -178,11 +184,13 @@ def _run_workflow_worker(thread_id: str, initial_state: GraphState, cancel_event
             result_dict=serializable_state,
             drawing_type=final_meta.get("drawing_type", "GENERIC"),
             discipline=final_meta.get("discipline", "Unknown"),
+            duration_sec=final_duration,
         )
-        add_log(thread_id, "Completed", "Extraction pipeline finished successfully. Deliverables generated.")
-        logger.info(f"Thread '{thread_id}' completed successfully.")
+        add_log(thread_id, "Completed", f"Extraction finished in {final_duration}s. Deliverables generated.")
+        logger.info(f"Thread '{thread_id}' completed successfully in {final_duration}s.")
 
     except Exception as e:
+        final_duration = round(time.time() - start_time, 1)
         tb = traceback.format_exc()
         logger.error(f"Thread '{thread_id}' failed: {e}\n{tb}")
         update_thread_status(
@@ -192,6 +200,7 @@ def _run_workflow_worker(thread_id: str, initial_state: GraphState, cancel_event
             current_step="Execution Failed",
             error_message=str(e),
             error_traceback=tb,
+            duration_sec=final_duration,
         )
         add_log(thread_id, "Error", f"Execution failed: {e}", log_level="ERROR")
 

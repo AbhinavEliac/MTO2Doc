@@ -30,12 +30,17 @@ def init_db():
                 current_step TEXT DEFAULT 'Initialized',
                 created_at TEXT,
                 updated_at TEXT,
+                duration_sec REAL DEFAULT 0.0,
                 error_message TEXT,
                 error_traceback TEXT,
                 config_json TEXT,
                 result_json TEXT
             );
         """)
+        try:
+            cursor.execute("ALTER TABLE threads ADD COLUMN duration_sec REAL DEFAULT 0.0")
+        except Exception:
+            pass
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS thread_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,6 +101,7 @@ def update_thread_status(
     result_dict: Optional[Dict[str, Any]] = None,
     drawing_type: Optional[str] = None,
     discipline: Optional[str] = None,
+    duration_sec: Optional[float] = None,
 ):
     now = datetime.now().isoformat()
     fields = ["updated_at = ?"]
@@ -125,6 +131,9 @@ def update_thread_status(
     if discipline is not None:
         fields.append("discipline = ?")
         params.append(discipline)
+    if duration_sec is not None:
+        fields.append("duration_sec = ?")
+        params.append(duration_sec)
 
     params.append(thread_id)
     sql = f"UPDATE threads SET {', '.join(fields)} WHERE thread_id = ?"
