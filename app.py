@@ -152,12 +152,23 @@ if "active_thread_id" not in st.session_state and all_threads:
     st.session_state["active_thread_id"] = all_threads[0]["thread_id"]
 
 # ─── Sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.markdown("## ⚙️ 2-Layer Extraction Pipeline")
+speed_preset = st.sidebar.selectbox(
+    "⚡ Pipeline Speed Preset",
+    options=[
+        "⚡ Balanced Hybrid (30–60 sec, Recommended)",
+        "🚀 Ultra-Fast Offline (10–20 sec, Zero APIs)",
+        "🔬 Deep Inspection (2–4 min)",
+    ],
+    index=0,
+    help="Select speed preset. Ultra-Fast runs local PaddleOCR + OpenCV Line Tracer with zero API delays.",
+)
+
+default_retries = 0 if "Ultra-Fast" in speed_preset else (3 if "Deep" in speed_preset else 1)
 
 max_retries = st.sidebar.slider(
     "Maximum Re-Extraction Cycles",
-    min_value=0, max_value=5, value=3,
-    help="Number of times the supervisor crops and re-scans suspect areas.",
+    min_value=0, max_value=5, value=default_retries,
+    help="Number of times the supervisor crops and re-scans suspect areas. Set 1 for fast processing, 0 to disable retry loops.",
 )
 
 st.sidebar.markdown("### 🔤 Layer 1: OCR Reading Layer")
@@ -166,16 +177,22 @@ ocr_option = st.sidebar.selectbox(
     options=[
         "PaddleOCR (Local / Offline)",
         "PyMuPDF Vector Text (Local / Offline)",
+        "Pathnovo ISA 5.1 Extraction Engine (High Accuracy)",
+        "PaddleOCR-VL (0.9B Layout Model)",
+        "LlamaParse / Vision Layout Agent",
         "Gemini Vision OCR (Online API)",
         "Qwen 2.5-VL / Vision API (Online)",
         "Qwen 3.7-VL / OpenRouter (Online)",
     ],
     index=0,
-    help="Select the 1st layer OCR engine. PaddleOCR & PyMuPDF run locally offline.",
+    help="Select the 1st layer OCR engine. Pathnovo ISA 5.1 engine extracts instrument loop data & line specs.",
 )
 ocr_engine_map = {
     "PaddleOCR (Local / Offline)": "paddle",
     "PyMuPDF Vector Text (Local / Offline)": "pdf_text",
+    "Pathnovo ISA 5.1 Extraction Engine (High Accuracy)": "pathnovo_api",
+    "PaddleOCR-VL (0.9B Layout Model)": "paddle_vl",
+    "LlamaParse / Vision Layout Agent": "llamaparse",
     "Gemini Vision OCR (Online API)": "gemini_ocr",
     "Qwen 2.5-VL / Vision API (Online)": "qwen_ocr",
     "Qwen 3.7-VL / OpenRouter (Online)": "qwen_37_ocr",
@@ -203,6 +220,46 @@ reasoning_engine_map = {
     "OpenAI GPT-4o Engine (Online / API)": "openai",
 }
 reasoning_engine = reasoning_engine_map.get(reasoning_option, "qwen")
+
+st.sidebar.markdown("### 🎯 Symbol Recognition Agent Engine")
+symbol_option = st.sidebar.selectbox(
+    "Symbol Detection Engine",
+    options=[
+        "Pathnovo ISA 5.1 Instrument & Symbol Engine",
+        "ISA-5.1 VLM Symbol Detector (Multimodal VLM)",
+        "GLM-OCR / RF-DETR Object Pipeline (Local / API)",
+        "Heuristic Bounding Box Harvester (Local / Offline)",
+    ],
+    index=0,
+    help="Select symbol detector. Pathnovo ISA 5.1 & VLMs classify graphical symbols & bounding boxes.",
+)
+symbol_engine_map = {
+    "Pathnovo ISA 5.1 Instrument & Symbol Engine": "pathnovo_isa51",
+    "ISA-5.1 VLM Symbol Detector (Multimodal VLM)": "vlm",
+    "GLM-OCR / RF-DETR Object Pipeline (Local / API)": "glm_rfdetr",
+    "Heuristic Bounding Box Harvester (Local / Offline)": "local",
+}
+symbol_engine = symbol_engine_map.get(symbol_option, "pathnovo_isa51")
+
+st.sidebar.markdown("### ⚡ Pipeline & Connectivity Agent Engine")
+pipeline_option = st.sidebar.selectbox(
+    "Pipeline & Line Tracing Engine",
+    options=[
+        "Pathnovo ISA 5.1 Line & Loop Spec Tracer",
+        "Computer Vision Line Tracer + VLM Connectivity (Hybrid CV + VLM)",
+        "Full Multimodal VLM Polyline Tracer (Online API)",
+        "Proximity & System Topological Tracer (Local / Offline)",
+    ],
+    index=0,
+    help="Select line tracer. Pathnovo & CV Line Tracer combine OpenCV line filtering with visual connectivity extraction.",
+)
+pipeline_engine_map = {
+    "Pathnovo ISA 5.1 Line & Loop Spec Tracer": "pathnovo_pipeline",
+    "Computer Vision Line Tracer + VLM Connectivity (Hybrid CV + VLM)": "cv_vlm_tracer",
+    "Full Multimodal VLM Polyline Tracer (Online API)": "vlm_tracer",
+    "Proximity & System Topological Tracer (Local / Offline)": "proximity_tracer",
+}
+pipeline_engine = pipeline_engine_map.get(pipeline_option, "pathnovo_pipeline")
 
 llm_provider = "gemini"
 llm_api_key = None
@@ -360,6 +417,8 @@ with tab_main_dashboard:
             "max_re_extractions": max_retries,
             "ocr_engine": ocr_engine,
             "reasoning_engine": reasoning_engine,
+            "symbol_engine": symbol_engine,
+            "pipeline_engine": pipeline_engine,
             "llm_provider": llm_provider,
             "llm_model": llm_model,
             "llm_api_key": llm_api_key,

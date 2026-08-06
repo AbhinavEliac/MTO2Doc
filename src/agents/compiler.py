@@ -18,6 +18,7 @@ All hardcoded tag-number lookups and project-specific logic have been removed.
 Properties are derived purely from extracted attributes or sensible generic defaults.
 """
 import re
+import math
 import logging
 from typing import Dict, Any, List, Optional
 from src.agents.base import BaseAgent
@@ -70,17 +71,39 @@ class CompilerAgent(BaseAgent):
             discipline=discipline,
         )
 
+        # Run spatial line tracer & relationship harvester on complete merged entities
+        from src.utils.line_tracer import trace_lines_and_connections
+        raw_documents = state.get("raw_documents", [])
+        pages = metadata.get("rasterized_pages", raw_documents)
+        raw_image = pages[0] if pages else None
+
+        cv_res = trace_lines_and_connections(
+            image_path=raw_image,
+            text_elements=text_elements,
+            symbols=symbols,
+            drawing_type=drawing_type,
+        )
+
+        # Merge relations & line traces
+        all_relations = list(relations)
+        existing_rel_keys = {(r.get("source_tag"), r.get("target_tag"), r.get("rel_type")) for r in all_relations}
+        for cr in cv_res.get("relations", []):
+            key = (cr.get("source_tag"), cr.get("target_tag"), cr.get("rel_type"))
+            if key not in existing_rel_keys:
+                existing_rel_keys.add(key)
+                all_relations.append(cr)
+
         # Always compile relationships (cross-type)
-        graph.relationships = self._compile_relationships(relations)
+        graph.relationships = self._compile_relationships(all_relations)
 
         # Always compile annotations (notes, elevations, ratings)
         graph.annotations = self._compile_annotations(text_elements)
 
         # Universal compilation across all detected entity types
         graph.equipment = self._compile_equipment(text_elements, symbols)
-        graph.lines = self._compile_lines(text_elements, geometry, relations)
-        graph.instruments = self._compile_instruments(text_elements, symbols)
-        graph.valves = self._compile_valves(text_elements, symbols, relations, graph.lines)
+        graph.lines = self._compile_lines(text_elements, geometry, all_relations)
+        graph.instruments = self._compile_instruments(text_elements, symbols, all_relations, graph.lines)
+        graph.valves = self._compile_valves(text_elements, symbols, all_relations, graph.lines)
         graph.safety_relief_valves = self._compile_safety_relief_valves(text_elements, symbols)
         graph.luminaires = self._compile_luminaires(text_elements, symbols)
         graph.panels = self._compile_panels(text_elements, symbols)
@@ -191,11 +214,14 @@ class CompilerAgent(BaseAgent):
             from_node = None
             to_node = None
             for rel in relations:
-                if rel["rel_type"] == "CONNECTS_TO":
-                    if rel["source_tag"] == tag:
-                        to_node = rel["target_tag"]
-                    elif rel["target_tag"] == tag:
-                        from_node = rel["source_tag"]
+                rtype = rel.get("rel_type", "").upper()
+                stag = rel.get("source_tag")
+                ttag = rel.get("target_tag")
+                if rtype in ("CONNECTS_TO", "FEEDS", "INSTALLED_ON"):
+                    if stag == tag:
+                        to_node = ttag
+                    elif ttag == tag:
+                        from_node = stag
 
             compiled.append(LineItem(
                 tag=tag,
@@ -210,7 +236,10 @@ class CompilerAgent(BaseAgent):
             ))
         return compiled
 
-    def _compile_instruments(self, texts: List[Dict], symbols: List[Dict]) -> List[InstrumentItem]:
+    def _compile_instruments(
+        self, texts: List[Dict], symbols: List[Dict],
+        relations: List[Dict], lines: List[LineItem]
+    ) -> List[InstrumentItem]:
         compiled = []
         inst_tags = [t for t in texts if t["classification"] == "INSTRUMENT_TAG"]
 
@@ -218,8 +247,63 @@ class CompilerAgent(BaseAgent):
             tag = inst["tag"]
             type_match = re.search(r'([A-Z]+)', tag)
             inst_type = type_match.group(1) if type_match else "INST"
-            loop_match = re.search(r'(\d+)', tag)
-            loop_id = loop_match.group(1) if loop_match else "0000"
+
+            # Find coordinates for symbol bubble
+            coords = None
+            for sym in symbols:
+                if sym.get("inferred_tag") == tag:
+                    coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
+                    break
+
+            # Spatial image text assembly for loop_id:
+            # Check OCR text elements positioned inside/near the instrument bubble coordinates
+            image_loop_id = None
+            if coords:
+                cy = (coords[0] + coords[2]) / 2.0
+                cx = (coords[1] + coords[3]) / 2.0
+                nearby_texts = []
+                for t in texts:
+                    attrs = t.get("attributes") or {}
+                    tx = float(attrs.get("pos_x", -1)) if attrs.get("pos_x") is not None else -1
+                    ty = float(attrs.get("pos_y", -1)) if attrs.get("pos_y") is not None else -1
+                    if tx >= 0 and ty >= 0:
+                        dist = math.hypot(cx - tx, cy - ty)
+                        if dist < 0.06:
+                            nearby_texts.append(t.get("value", ""))
+
+                for txt in nearby_texts:
+                    num_match = re.search(r'(\d{3,5}[A-Z]?)', txt)
+                    if num_match:
+                        image_loop_id = num_match.group(1)
+                        break
+
+            if not image_loop_id:
+                loop_match = re.search(r'(\d{3,5}[A-Z]?)', tag)
+                image_loop_id = loop_match.group(1) if loop_match else "0000"
+
+            loop_id = image_loop_id
+
+            # Case-insensitive relation check for host line or equipment
+            associated_line = None
+            for rel in relations:
+                rtype = rel.get("rel_type", "").upper()
+                stag = rel.get("source_tag")
+                ttag = rel.get("target_tag")
+                if stag == tag and rtype in ("MONITORS", "INSTALLED_ON"):
+                    associated_line = ttag
+                    break
+                elif ttag == tag and rtype in ("MONITORS", "INSTALLED_ON"):
+                    associated_line = stag
+                    break
+
+            service_fluid = None
+            if associated_line:
+                for line in lines:
+                    if line.tag == associated_line:
+                        service_fluid = f"{line.service} ({line.tag})"
+                        break
+                if not service_fluid:
+                    service_fluid = associated_line
 
             coords = None
             for sym in symbols:
@@ -230,7 +314,7 @@ class CompilerAgent(BaseAgent):
             compiled.append(InstrumentItem(
                 tag=tag,
                 type=inst_type,
-                service=None,
+                service=service_fluid,
                 location="Field",
                 loop_id=loop_id,
                 coordinates=coords,
@@ -248,7 +332,6 @@ class CompilerAgent(BaseAgent):
             tag = v["tag"]
             tag_upper = tag.upper()
 
-            # Determine valve type from tag prefix (not hardcoded specific numbers)
             v_type = "Valve"
             if "GB" in tag_upper or "GATE" in tag_upper:
                 v_type = "Gate Valve"
@@ -267,11 +350,17 @@ class CompilerAgent(BaseAgent):
             elif tag_upper.startswith(('MOV', 'SDV', 'BDV', 'EV')):
                 v_type = "On-Off Valve"
 
-            # Find associated line
+            # Case-insensitive relation check for host line
             associated_line = None
             for rel in relations:
-                if rel["source_tag"] == tag and rel["rel_type"] == "INSTALLED_ON":
-                    associated_line = rel["target_tag"]
+                rtype = rel.get("rel_type", "").upper()
+                stag = rel.get("source_tag")
+                ttag = rel.get("target_tag")
+                if stag == tag and rtype in ("INSTALLED_ON", "CONNECTS_TO", "MONITORS"):
+                    associated_line = ttag
+                    break
+                elif ttag == tag and rtype in ("INSTALLED_ON", "CONNECTS_TO", "MONITORS"):
+                    associated_line = stag
                     break
 
             # Derive size from the associated line

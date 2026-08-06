@@ -1,16 +1,12 @@
 """
-LangGraph Workflow Definition — Optimized Topology.
+LangGraph Workflow Definition — 3-Agent Parallel Perception Topology.
 
-Topology change (Option C):
-  OLD: supervisor → [text | symbol | relation | geometry] → compiler
-       (4 parallel VLM image calls)
+Perception Topology:
+  supervisor → [text_recognition | symbol_recognition | pipeline_recognition] → compiler
 
-  NEW: supervisor → [text_detection | unified_vision] → compiler
-       text_detection  = PaddleOCR (local) + LLM text-only classification (1 cheap call)
-       unified_vision  = 1 VLM image call for symbols + relations + geometry
-
-Token savings vs old design:
-  ~75% fewer image tokens per run (4 image calls → 1 image call)
+1. text_recognition     : Layer 1 OCR (PaddleOCR / PaddleOCR-VL / LlamaParse) + Layer 2 Tag & Spec Parsing
+2. symbol_recognition   : ISA-5.1 & Multi-discipline Symbol Bounding Box Detection (RF-DETR / GLM-OCR / VLM)
+3. pipeline_recognition : Piping Runs, Line Tracing, Busbars & Connectivity Relationships
 """
 
 import logging
@@ -21,7 +17,11 @@ from src.state import GraphState
 from src.agents.ingestion import IngestionAgent
 from src.agents.context_loader import ContextLoaderAgent
 from src.agents.supervisor import SupervisorAgent
-from src.agents.parallel_vision import TextDetectionAgent, UnifiedVisionAgent
+from src.agents.parallel_vision import (
+    TextRecognitionAgent,
+    SymbolRecognitionAgent,
+    PipelineRecognitionAgent,
+)
 from src.agents.compiler import CompilerAgent
 from src.agents.validation import ValidationAgent
 from src.agents.completeness import CompletenessAgent
@@ -53,8 +53,8 @@ def route_completeness(state: GraphState) -> str:
 
 def create_workflow() -> StateGraph:
     """
-    Assembles and compiles the StateGraph workflow with the optimized
-    two-node parallel vision topology.
+    Assembles and compiles the StateGraph workflow with the 3-agent
+    parallel perception topology.
     """
     workflow = StateGraph(GraphState)
 
@@ -63,9 +63,10 @@ def create_workflow() -> StateGraph:
     context_loader_agent = ContextLoaderAgent()
     supervisor_agent = SupervisorAgent()
 
-    # Optimized parallel vision nodes
-    text_agent = TextDetectionAgent()          # PaddleOCR → LLM text-only
-    unified_vision_agent = UnifiedVisionAgent()  # 1 image call: symbols + relations + geometry
+    # 3 Parallel Perception Agents
+    text_recognition_agent = TextRecognitionAgent()
+    symbol_recognition_agent = SymbolRecognitionAgent()
+    pipeline_recognition_agent = PipelineRecognitionAgent()
 
     compiler_agent = CompilerAgent()
     validation_agent = ValidationAgent()
@@ -78,9 +79,10 @@ def create_workflow() -> StateGraph:
     workflow.add_node("context_loader", context_loader_agent.run)
     workflow.add_node("supervisor", supervisor_agent.run)
 
-    # Two parallel vision nodes (was four)
-    workflow.add_node("text_detection", text_agent.run)
-    workflow.add_node("unified_vision", unified_vision_agent.run)
+    # 3 Parallel Perception Nodes
+    workflow.add_node("text_recognition", text_recognition_agent.run)
+    workflow.add_node("symbol_recognition", symbol_recognition_agent.run)
+    workflow.add_node("pipeline_recognition", pipeline_recognition_agent.run)
 
     # Backend pipeline
     workflow.add_node("compiler", compiler_agent.run)
@@ -95,13 +97,15 @@ def create_workflow() -> StateGraph:
     workflow.add_edge("ingest", "context_loader")
     workflow.add_edge("context_loader", "supervisor")
 
-    # Fork to two parallel nodes (was four)
-    workflow.add_edge("supervisor", "text_detection")
-    workflow.add_edge("supervisor", "unified_vision")
+    # Fork to 3 parallel perception nodes
+    workflow.add_edge("supervisor", "text_recognition")
+    workflow.add_edge("supervisor", "symbol_recognition")
+    workflow.add_edge("supervisor", "pipeline_recognition")
 
     # Join at compiler
-    workflow.add_edge("text_detection", "compiler")
-    workflow.add_edge("unified_vision", "compiler")
+    workflow.add_edge("text_recognition", "compiler")
+    workflow.add_edge("symbol_recognition", "compiler")
+    workflow.add_edge("pipeline_recognition", "compiler")
 
     # Serial validation pipeline
     workflow.add_edge("compiler", "validation")

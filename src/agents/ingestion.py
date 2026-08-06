@@ -121,9 +121,11 @@ class IngestionAgent(BaseAgent):
                     except Exception as pdf_err:
                         logger.warning(f"PDF text layer extraction failed ({pdf_err}). Falling back to OCR.")
 
-                # OCR fallback
-                proc_img = preprocess_for_ocr(rasterized_pages[0])
-                paddle_items = run_paddle_ocr(proc_img)
+                # Title block crop OCR fallback (fast sub-crop instead of full page OCR)
+                from src.utils.image_utils import crop_normalized_box
+                title_crop = os.path.join(os.path.dirname(rasterized_pages[0]), "title_block_crop.png")
+                crop_normalized_box(rasterized_pages[0], [0.65, 0.55, 1.0, 1.0], title_crop)
+                paddle_items = run_paddle_ocr(title_crop)
                 metadata_dict = extract_metadata_from_paddle(paddle_items, filename=filename)
 
             except Exception as e:
@@ -149,6 +151,11 @@ class IngestionAgent(BaseAgent):
             }
 
         # ── Gemini Vision mode ─────────────────────────────────────────────────
+        provider = state.get("llm_provider")
+        model_name = state.get("llm_model")
+        api_key = state.get("llm_api_key")
+        base_url = state.get("llm_base_url")
+
         uploaded_info = self.upload_file_to_api(rasterized_pages[0])
 
         if uploaded_info:
@@ -156,11 +163,19 @@ class IngestionAgent(BaseAgent):
                 image_uri=uploaded_info["uri"],
                 image_mime=uploaded_info["mime"],
                 filename=filename,
+                provider=provider,
+                model_name=model_name,
+                api_key=api_key,
+                base_url=base_url,
             )
         else:
             meta_result = self._extract_metadata_via_vision(
                 image_path=rasterized_pages[0],
                 filename=filename,
+                provider=provider,
+                model_name=model_name,
+                api_key=api_key,
+                base_url=base_url,
             )
 
         metadata_dict = meta_result.model_dump()
@@ -185,6 +200,12 @@ class IngestionAgent(BaseAgent):
         """
         output_dir = os.path.join(os.path.dirname(pdf_path), "rasterized")
         os.makedirs(output_dir, exist_ok=True)
+
+        cached_page = os.path.join(output_dir, "page_1.png")
+        if os.path.exists(cached_page) and os.path.getsize(cached_page) > 0:
+            logger.info(f"Using cached rasterized page: '{cached_page}'")
+            return [cached_page]
+
         rasterized = []
 
         try:
@@ -227,6 +248,10 @@ class IngestionAgent(BaseAgent):
         image_uri: Optional[str] = None,
         image_mime: str = "image/png",
         filename: Optional[str] = None,
+        provider: Optional[str] = None,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
     ) -> DrawingMetadata:
         """
         Uses Gemini Vision API to inspect the drawing title block and extract metadata.
@@ -262,6 +287,10 @@ class IngestionAgent(BaseAgent):
                 image_path=image_path,
                 image_mime=image_mime,
                 image_uri=image_uri,
+                provider=provider,
+                model_name=model_name,
+                api_key=api_key,
+                base_url=base_url,
             )
         except Exception as e:
             logger.error(f"Gemini metadata extraction failed: {e}. Falling back to generic defaults.")

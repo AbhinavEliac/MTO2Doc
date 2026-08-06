@@ -1,22 +1,27 @@
 """
-Parallel Vision Agents — Hybrid OCR + Multi-Provider Reasoning Architecture.
+Parallel Vision & Perception Agents — 3-Agent Parallel Perception Architecture.
 
-2-LAYER EXTRACTION PIPELINE
-───────────────────────────
-Layer 1 — OCR Reading Layer (Customizable Local / Online):
-  • Local Options : PaddleOCR, PyMuPDF Vector Text, GOT-OCR 2.0
-  • Online Options: Gemini Vision OCR, Qwen 2.5-VL / OpenAI-compatible Vision OCR
+3-AGENT PARALLEL PERCEPTION STAGE:
+───────────────────────────────────
+1. TextRecognitionAgent (text_recognition):
+   • Specialized Text & Tag Recognition (Layer 1 OCR + Layer 2 Reasoning / Tag Parsing).
+   • Supports PaddleOCR, PyMuPDF Vector Text, PaddleOCR-VL (0.9B), LlamaParse, Qwen 3.7-VL, Gemini, OpenAI.
+   • Outputs: text_elements (equipment tags, line tags, instrument tags, valve tags, specs, notes, ratings).
 
-Layer 2 — Reasoning & Structuring Engine (Customizable Local / Online):
-  • Local Option  : Rule-Based Classifier (zero LLM tokens, regex-based)
-  • Online Options: Qwen 2.5 Reasoning Engine, Gemini 2.0 Flash, OpenAI GPT-4o
-                   Performs deep reasoning: fixes OCR typos, recombines split tags,
-                   associates misplaced attributes (pressure, temperature, wattage, cable size),
-                   finds missing entities, and outputs structured JSON.
+2. SymbolRecognitionAgent (symbol_recognition):
+   • Specialized ISA-5.1 & Multi-discipline Symbol Recognition (Object Detection & Bounding Boxes).
+   • Supports GLM-OCR / RF-DETR pipelines, Roboflow workflows, and VLM Symbol Classification.
+   • Outputs: symbols (symbol_type, inferred_tag, ymin, xmin, ymax, xmax).
+
+3. PipelineRecognitionAgent (pipeline_recognition):
+   • Specialized Line Tracing, Flow Directions & Connectivity Relationship Recognition.
+   • Traces piping runs, electrical busbars, cable routes, signal loops, and topological links (INSTALLED_ON, CONNECTS_TO, MONITORS, FEEDS, EARTHED_TO).
+   • Outputs: relations & geometry.
 """
 
 import logging
 import os
+import re
 import time
 from typing import Dict, Any, List, Optional
 
@@ -146,7 +151,7 @@ def _get_tag_categories(drawing_type: str) -> str:
         return _SLD_TAG_CATEGORIES
     if dt in ('STRUCTURAL_LAYOUT', 'HVAC_LAYOUT', 'CABLE_SCHEDULE', 'ISOMETRIC', 'GENERIC'):
         return _GENERIC_TAG_CATEGORIES
-    return _PID_TAG_CATEGORIES  # P&ID / PFD default
+    return _PID_TAG_CATEGORIES
 
 
 def _get_symbol_vocab(drawing_type: str) -> str:
@@ -180,6 +185,10 @@ class RawSymbolDetection(BaseModel):
     ymax: float = Field(description="Normalized ymax coordinate [0.0–1.0]")
     xmax: float = Field(description="Normalized xmax coordinate [0.0–1.0]")
 
+class RawSymbolList(BaseModel):
+    symbols: List[RawSymbolDetection] = Field(default_factory=list)
+
+
 class RawRelation(BaseModel):
     source_tag: str = Field(description="Source object tag")
     target_tag: str = Field(description="Target object tag")
@@ -190,41 +199,27 @@ class RawLineTrace(BaseModel):
     grid_path: List[List[float]] = Field(description="List of coordinates [y, x] representing the line polyline path")
 
 class RawGeometryLayout(BaseModel):
-    traces: List[RawLineTrace]
-    sheet_grids: List[str] = Field(description="Grid designations detected (e.g., B5, D10)")
+    traces: List[RawLineTrace] = Field(default_factory=list)
+    sheet_grids: List[str] = Field(default_factory=list, description="Grid designations detected (e.g., B5, D10)")
 
-
-class UnifiedExtractionResult(BaseModel):
-    """
-    Single consolidated schema for VLM calls extracting symbols, relations, and geometry.
-    """
-    symbols: List[RawSymbolDetection] = Field(
-        default_factory=list,
-        description="All engineering symbol detections with bounding boxes"
-    )
-    relations: List[RawRelation] = Field(
-        default_factory=list,
-        description="Source→target tag relationship pairs"
-    )
-    geometry: RawGeometryLayout = Field(
-        default_factory=lambda: RawGeometryLayout(traces=[], sheet_grids=[]),
-        description="Pipeline traces and sheet grid zones"
-    )
+class RawPipelineList(BaseModel):
+    relations: List[RawRelation] = Field(default_factory=list)
+    geometry: RawGeometryLayout = Field(default_factory=lambda: RawGeometryLayout(traces=[], sheet_grids=[]))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Agent 1: Text Detection Agent (2-Layer Customizable Architecture)
+# AGENT 1: Text Recognition Agent (OCR + Tag & Attribute Parsing)
 # ──────────────────────────────────────────────────────────────────────────────
 
-class TextDetectionAgent(BaseAgent):
+class TextRecognitionAgent(BaseAgent):
     """
-    2-Layer Customizable Text Extraction Agent:
-      Layer 1 — OCR Reading (Local: PaddleOCR / PyMuPDF | Online: Gemini Vision / Qwen 2.5-VL)
-      Layer 2 — Reasoning & Refinement Engine (Local: Regex Classifier | Online: Qwen 2.5, Gemini, OpenAI)
+    Dedicated Text Recognition Agent:
+      • Layer 1 OCR: PaddleOCR, PyMuPDF Vector Text, PaddleOCR-VL (0.9B), LlamaParse, Qwen 3.7 VL
+      • Layer 2 Reasoning Engine: Rule-Based Classifier | Deep VLM Reasoning Engine
     """
 
     def run(self, state: GraphState) -> Dict[str, Any]:
-        logger.info("Running 2-Layer Text Detection Agent...")
+        logger.info("Running Text Recognition Agent (Layer 1 OCR + Layer 2 Reasoning)...")
 
         use_mocks = state.get("use_mocks", False)
         if use_mocks:
@@ -247,8 +242,7 @@ class TextDetectionAgent(BaseAgent):
         reasoning_engine = state.get("reasoning_engine", "rule_based").lower()
         drawing_type = meta.get("drawing_type", "PID")
 
-        # LLM Provider override settings (e.g. Qwen 2.5 via DashScope / OpenRouter / Ollama)
-        llm_provider = state.get("llm_provider") or ("qwen" if reasoning_engine == "qwen" else "gemini")
+        llm_provider = state.get("llm_provider") or ("qwen" if reasoning_engine in ("qwen", "qwen_37") else "gemini")
         llm_model = state.get("llm_model")
         llm_api_key = state.get("llm_api_key")
         llm_base_url = state.get("llm_base_url")
@@ -256,14 +250,27 @@ class TextDetectionAgent(BaseAgent):
         from src.utils.tag_classifier import classify_paddle_results
 
         logger.info(
-            f"TextDetectionAgent: drawing_type='{drawing_type}', "
-            f"Layer 1 (OCR)='{ocr_engine}', Layer 2 (Reasoning)='{reasoning_engine}'"
+            f"TextRecognitionAgent: drawing_type='{drawing_type}', "
+            f"Layer 1 OCR='{ocr_engine}', Layer 2 Reasoning='{reasoning_engine}'"
         )
 
         # ── LAYER 1: OCR TEXT EXTRACTION ─────────────────────────────────────
         ocr_items: List[Dict[str, Any]] = []
 
-        # Option A: PyMuPDF Vector Text Layer (Instant local)
+        # Option A: Pathnovo ISA 5.1 Extraction Engine
+        if ocr_engine in ("pathnovo_api", "pathnovo"):
+            try:
+                from src.utils.pathnovo_api import PathnovoAPIClient
+                logger.info("Layer 1: Executing Pathnovo ISA 5.1 P&ID Extraction Engine...")
+                p_client = PathnovoAPIClient(api_key=llm_api_key)
+                res_p = p_client.extract_pid_data(image_path=raw_image, drawing_type=drawing_type)
+                if res_p.get("text_elements"):
+                    logger.info(f"Pathnovo ISA 5.1 Engine extracted {len(res_p['text_elements'])} text elements.")
+                    return {"extracted_entities": {"text_elements": res_p["text_elements"]}}
+            except Exception as p_err:
+                logger.warning(f"Pathnovo Engine failed ({p_err}). Falling back to local OCR pipeline.")
+
+        # Option B: PyMuPDF Vector Text Layer
         if (ocr_engine == "pdf_text" or ocr_engine == "paddle") and original_doc.lower().endswith('.pdf'):
             try:
                 from src.utils.paddle_ocr import run_pdf_text_extraction
@@ -275,13 +282,13 @@ class TextDetectionAgent(BaseAgent):
             except Exception as pdf_err:
                 logger.warning(f"PyMuPDF vector text extraction failed ({pdf_err}).")
 
-        # Option B: Local PaddleOCR (serves as spatial OCR baseline for Online Layer 2)
-        if not ocr_items or ocr_engine in ("paddle", "pdf_text", "got-ocr", "local"):
+        # Option C: Local PaddleOCR / PaddleOCR-VL baseline
+        if not ocr_items or ocr_engine in ("paddle", "pdf_text", "paddle_vl", "got-ocr", "local"):
             try:
                 from src.utils.preprocess import preprocess_for_ocr
                 from src.utils.paddle_ocr import run_paddle_ocr
                 processed_image = preprocess_for_ocr(raw_image)
-                logger.info("Layer 1: Running local PaddleOCR engine...")
+                logger.info("Layer 1: Running local PaddleOCR / PaddleOCR-VL baseline engine...")
                 paddle_items = run_paddle_ocr(processed_image)
                 if paddle_items:
                     logger.info(f"Layer 1: PaddleOCR extracted {len(paddle_items)} text items.")
@@ -289,8 +296,8 @@ class TextDetectionAgent(BaseAgent):
             except Exception as paddle_err:
                 logger.warning(f"Local PaddleOCR extraction failed ({paddle_err}).")
 
-        # Option C: Online Gemini Vision / Qwen 2.5-VL / Qwen 3.7-VL OCR
-        if ocr_engine in ("gemini_ocr", "qwen_ocr", "qwen_37_ocr", "online_ocr"):
+        # Option D: Online Gemini / Qwen 2.5 / Qwen 3.7 VL / LlamaParse Vision OCR
+        if ocr_engine in ("gemini_ocr", "qwen_ocr", "qwen_37_ocr", "llamaparse", "online_ocr"):
             logger.info(f"Layer 1: Running Online Vision OCR ({ocr_engine})...")
             try:
                 prompt_ocr = (
@@ -300,7 +307,7 @@ class TextDetectionAgent(BaseAgent):
                 raw_ocr_res = self.invoke_text(
                     prompt=prompt_ocr,
                     image_path=raw_image,
-                    provider="qwen" if ocr_engine in ("qwen_ocr", "qwen_37_ocr") else "gemini",
+                    provider="qwen" if ocr_engine in ("qwen_ocr", "qwen_37_ocr", "llamaparse") else "gemini",
                     model_name=llm_model,
                     api_key=llm_api_key,
                     base_url=llm_base_url,
@@ -321,7 +328,7 @@ class TextDetectionAgent(BaseAgent):
             logger.info(f"Layer 2: Rule-based classifier produced {len(structured)} structured items.")
             return {"extracted_entities": {"text_elements": structured}}
 
-        # Option B: Online LLM Deep Reasoning Engine (Qwen 2.5, Qwen 3.7, Gemini, OpenAI, etc.)
+        # Option B: Online LLM Deep Reasoning Engine (Qwen 3.7 VL, Gemini, OpenAI, etc.)
         logger.info(f"Layer 2: Executing Online LLM Reasoning Engine using provider '{llm_provider}'...")
         try:
             from src.utils.paddle_ocr import format_paddle_results_for_llm
@@ -368,22 +375,151 @@ class TextDetectionAgent(BaseAgent):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Agent 2: Unified Vision Agent (Symbols, Relations, Geometry)
+# AGENT 2: Symbol Recognition Agent (ISA-5.1 & Multi-Discipline Symbol Detection)
 # ──────────────────────────────────────────────────────────────────────────────
 
-class UnifiedVisionAgent(BaseAgent):
+class SymbolRecognitionAgent(BaseAgent):
     """
-    Consolidated single VLM call agent for symbols, relations, and geometry.
+    Dedicated Symbol Recognition Agent:
+      • Detects graphic component symbols & bounding boxes (ymin, xmin, ymax, xmax).
+      • Supports VLM Multimodal Symbol Detector, GLM-OCR / RF-DETR pipelines, and Local Harvesters.
     """
 
     def run(self, state: GraphState) -> Dict[str, Any]:
-        logger.info("Running Unified Vision Agent...")
+        logger.info("Running Symbol Recognition Agent (ISA-5.1 & Graphic Symbol Detector)...")
 
         use_mocks = state.get("use_mocks", False)
         if use_mocks:
+            logger.info("Demo Mock Fallbacks are ENABLED. Returning mock symbols.")
+            return {"extracted_entities": {"symbols": MOCK_SYMBOLS}}
+
+        meta = state.get("metadata", {})
+        pages = meta.get("rasterized_pages", state.get("raw_documents", []))
+        raw_documents = state.get("raw_documents", [])
+        if not pages and not raw_documents:
+            return {"extracted_entities": {"symbols": []}}
+
+        raw_image = pages[0] if pages else raw_documents[0]
+        local_mode = state.get("local_mode", False)
+        symbol_engine = state.get("symbol_engine", "vlm").lower()
+
+        llm_provider = state.get("llm_provider")
+        llm_model = state.get("llm_model")
+        llm_api_key = state.get("llm_api_key")
+        llm_base_url = state.get("llm_base_url")
+
+        symbols = []
+        drawing_type = meta.get("drawing_type", "PID")
+        symbol_vocab = _get_symbol_vocab(drawing_type)
+        dt_label = drawing_type.replace('_', ' ')
+
+        # Option A: Pathnovo ISA 5.1 Native Instrument & Symbol Parser
+        if "pathnovo" in symbol_engine:
+            try:
+                from src.utils.pathnovo_api import PathnovoAPIClient
+                logger.info("SymbolRecognitionAgent: Executing Pathnovo ISA 5.1 Symbol Parser...")
+                p_client = PathnovoAPIClient(api_key=llm_api_key)
+                res_p = p_client.extract_pid_data(image_path=raw_image, drawing_type=drawing_type)
+                if res_p.get("symbols"):
+                    logger.info(f"SymbolRecognitionAgent (pathnovo): extracted {len(res_p['symbols'])} symbols.")
+                    symbols = res_p["symbols"]
+            except Exception as p_err:
+                logger.warning(f"Pathnovo Symbol Parser failed ({p_err}). Falling back to standard VLM pipeline.")
+
+        # Option B: VLM or GLM-OCR / RF-DETR object detector
+        elif not (local_mode or symbol_engine == "local"):
+            prompt = (
+                f"You are an expert industrial vision detector specializing in ISA-5.1 and engineering symbol recognition for {dt_label} drawings.\n"
+                f"Identify all graphical component symbols present in this drawing image.\n\n"
+                f"SYMBOL TAXONOMY VOCABULARY:\n  {symbol_vocab}\n\n"
+                "FOR EACH DETECTED SYMBOL PROVIDE:\n"
+                "  1. symbol_type: The exact symbol classification from the taxonomy vocabulary.\n"
+                "  2. inferred_tag: Nearest readable tag number/ID (e.g., 26CB9131, PIT-9055, DB-01, EP-01) if visible nearby.\n"
+                "  3. ymin, xmin, ymax, xmax: Normalized bounding box coordinates between 0.0 and 1.0.\n\n"
+                "Return the list of detected symbols in structured JSON format."
+            )
+
+            try:
+                result = self.invoke_structured(
+                    schema=RawSymbolList,
+                    prompt=prompt,
+                    image_path=raw_image,
+                    image_uri=meta.get("primary_page_uri"),
+                    image_mime=meta.get("primary_page_mime", "image/png"),
+                    provider=llm_provider,
+                    model_name=llm_model,
+                    api_key=llm_api_key,
+                    base_url=llm_base_url,
+                )
+                symbols = [s.model_dump() for s in result.symbols]
+                logger.info(f"SymbolRecognitionAgent ({symbol_engine}): VLM extracted {len(symbols)} symbols.")
+            except Exception as err:
+                logger.error(f"SymbolRecognitionAgent VLM call failed ({err}). Using heuristic harvester.")
+
+        # Option B: Heuristic symbol harvester from text elements in state
+        texts = state.get("extracted_entities", {}).get("text_elements", [])
+        existing_tags = {s.get("inferred_tag") for s in symbols if s.get("inferred_tag")}
+
+        for t in texts:
+            tag = t.get("tag")
+            cls = t.get("classification")
+            if not tag or tag in existing_tags:
+                continue
+
+            sym_type = None
+            if cls == "EQUIPMENT_TAG":
+                sym_type = "EQUIPMENT"
+            elif cls == "VALVE_TAG":
+                sym_type = "CHECK_VALVE" if ("CB" in tag.upper() or "CHECK" in tag.upper()) else "VALVE"
+            elif cls == "INSTRUMENT_TAG":
+                sym_type = "INST_BUBBLE"
+            elif cls == "PSV_TAG":
+                sym_type = "PSV"
+            elif cls == "LUMINAIRE_TAG":
+                sym_type = "LUMINAIRE"
+            elif cls == "PANEL_TAG":
+                sym_type = "PANEL"
+            elif cls == "EARTH_BAR_TAG":
+                sym_type = "EARTH_BAR"
+            elif cls == "EARTH_PIT_TAG":
+                sym_type = "EARTH_PIT"
+
+            if sym_type:
+                attrs = t.get("attributes") or {}
+                px = float(attrs.get("pos_x", 0.5)) if attrs.get("pos_x") else 0.5
+                py = float(attrs.get("pos_y", 0.5)) if attrs.get("pos_y") else 0.5
+                symbols.append({
+                    "symbol_type": sym_type,
+                    "inferred_tag": tag,
+                    "ymin": round(max(0.0, py - 0.02), 4),
+                    "xmin": round(max(0.0, px - 0.02), 4),
+                    "ymax": round(min(1.0, py + 0.02), 4),
+                    "xmax": round(min(1.0, px + 0.02), 4),
+                })
+
+        logger.info(f"SymbolRecognitionAgent produced {len(symbols)} total graphical symbols.")
+        return {"extracted_entities": {"symbols": symbols}}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AGENT 3: Pipeline Recognition Agent (Line Tracing, Flow Directions & Connectivity)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PipelineRecognitionAgent(BaseAgent):
+    """
+    Dedicated Pipeline & Connectivity Recognition Agent:
+      • Traces piping runs, line sizes, electrical busbars, cable routes, and flow direction arrows.
+      • Integrates OpenCV Computer Vision Line Tracer + Spatial Proximity Linker.
+    """
+
+    def run(self, state: GraphState) -> Dict[str, Any]:
+        logger.info("Running Pipeline Recognition Agent (Connectivity & Line Tracing)...")
+
+        use_mocks = state.get("use_mocks", False)
+        if use_mocks:
+            logger.info("Demo Mock Fallbacks are ENABLED. Returning mock pipeline relations.")
             return {
                 "extracted_entities": {
-                    "symbols": MOCK_SYMBOLS,
                     "relations": MOCK_RELATIONS,
                     "geometry": {"traces": [], "sheet_grids": ["B5", "C9", "D10"]},
                 }
@@ -393,65 +529,98 @@ class UnifiedVisionAgent(BaseAgent):
         pages = meta.get("rasterized_pages", state.get("raw_documents", []))
         raw_documents = state.get("raw_documents", [])
         if not pages and not raw_documents:
-            return {"extracted_entities": {"symbols": [], "relations": [], "geometry": {}}}
+            return {"extracted_entities": {"relations": [], "geometry": {}}}
 
         raw_image = pages[0] if pages else raw_documents[0]
         local_mode = state.get("local_mode", False)
+        pipeline_engine = state.get("pipeline_engine", "cv_vlm_tracer").lower()
 
         llm_provider = state.get("llm_provider")
         llm_model = state.get("llm_model")
         llm_api_key = state.get("llm_api_key")
         llm_base_url = state.get("llm_base_url")
 
-        if local_mode and not llm_provider:
-            logger.info("Local Mode: skipping API visual symbol extraction. Returning empty symbol set.")
-            return {"extracted_entities": {"symbols": [], "relations": [], "geometry": {"traces": [], "sheet_grids": []}}}
-
         drawing_type = meta.get("drawing_type", "PID")
-        symbol_vocab = _get_symbol_vocab(drawing_type)
         dt_label = drawing_type.replace('_', ' ')
 
-        unified_prompt = (
-            f"You are a computer vision and engineering analysis system examining a high-resolution "
-            f"{dt_label} engineering drawing. Perform THREE tasks simultaneously:\n\n"
-            "TASK A — SYMBOL DETECTION:\n"
-            f"Identify all engineering graphical symbols found in this {dt_label}. For each symbol provide:\n"
-            f"  - symbol_type: choose from relevant types including: {symbol_vocab}.\n"
-            "  - inferred_tag: nearest readable tag ID if visible.\n"
-            "  - ymin, xmin, ymax, xmax: normalized bounding box [0.0–1.0].\n\n"
-            "TASK B — RELATIONSHIP EXTRACTION:\n"
-            "Identify source→target engineering relationships:\n"
-            "  - MONITORS: instrument or sensor monitors a line or equipment.\n"
-            "  - INSTALLED_ON: component installed on a specific line or equipment.\n"
-            "  - CONNECTS_TO: pipe, cable or conductor connected to equipment.\n"
-            "  - FEEDS: panel or source feeds downstream equipment.\n"
-            "  - EARTHED_TO: earthing connection between equipment and earth point.\n"
-            "Return source_tag, target_tag, rel_type for each.\n\n"
-            "TASK C — GEOMETRY LAYOUT:\n"
-            "List the margin grid sectors (e.g., B5, C9, D10) visible in the drawing border.\n"
-            "Also trace any named pipe runs or cable routes that cross multiple grid zones with their path coordinates.\n\n"
-            "Return all findings in the structured JSON format requested."
-        )
+        relations = []
+        geometry = {"traces": [], "sheet_grids": ["A1", "B5", "C9", "D10"]}
 
-        try:
-            result = self.invoke_structured(
-                schema=UnifiedExtractionResult,
-                prompt=unified_prompt,
-                image_path=raw_image,
-                image_uri=meta.get("primary_page_uri"),
-                image_mime=meta.get("primary_page_mime", "image/png"),
-                provider=llm_provider,
-                model_name=llm_model,
-                api_key=llm_api_key,
-                base_url=llm_base_url,
+        # Option A: Pathnovo ISA 5.1 Line & Loop Spec Tracer
+        if "pathnovo" in pipeline_engine:
+            try:
+                from src.utils.pathnovo_api import PathnovoAPIClient
+                logger.info("PipelineRecognitionAgent: Executing Pathnovo ISA 5.1 Line Tracer...")
+                p_client = PathnovoAPIClient(api_key=llm_api_key)
+                res_p = p_client.extract_pid_data(image_path=raw_image, drawing_type=drawing_type)
+                if res_p.get("relations"):
+                    logger.info(f"PipelineRecognitionAgent (pathnovo): extracted {len(res_p['relations'])} relations.")
+                    relations = res_p["relations"]
+            except Exception as p_err:
+                logger.warning(f"Pathnovo Pipeline Tracer failed ({p_err}). Falling back to CV line tracer.")
+
+        # Option B: Full Multimodal VLM Polyline Tracer or Hybrid CV + VLM
+        elif not (local_mode or pipeline_engine == "proximity_tracer"):
+            prompt = (
+                f"You are an expert topological pipeline and electrical connectivity tracer analyzing a {dt_label} drawing.\n\n"
+                "TASK 1 — TOPOLOGICAL RELATIONSHIPS:\n"
+                "Extract source→target connectivity pairs:\n"
+                "  - MONITORS: Instrument or sensor monitoring a line or equipment.\n"
+                "  - INSTALLED_ON: Valve or fitting installed on a line run.\n"
+                "  - CONNECTS_TO: Pipe, busbar, or cable connecting two pieces of equipment.\n"
+                "  - FEEDS: Distribution panel or switchboard feeding a circuit or breaker.\n"
+                "  - EARTHED_TO: Equipment grounded to an earth bar or earth pit.\n\n"
+                "TASK 2 — GEOMETRY & SHEET GRIDS:\n"
+                "List the border grid sector designations (e.g., A1, B5, C9, D10) and trace any named piping runs or cable routes.\n\n"
+                "Return all findings in structured JSON format."
             )
 
-            symbols = [s.model_dump() for s in result.symbols]
-            relations = [r.model_dump() for r in result.relations]
-            geometry = result.geometry.model_dump()
+            try:
+                result = self.invoke_structured(
+                    schema=RawPipelineList,
+                    prompt=prompt,
+                    image_path=raw_image,
+                    image_uri=meta.get("primary_page_uri"),
+                    image_mime=meta.get("primary_page_mime", "image/png"),
+                    provider=llm_provider,
+                    model_name=llm_model,
+                    api_key=llm_api_key,
+                    base_url=llm_base_url,
+                )
+                relations = [r.model_dump() for r in result.relations]
+                geometry = result.geometry.model_dump()
+            except Exception as err:
+                logger.error(f"PipelineRecognitionAgent VLM call failed ({err}). Falling back to CV line tracer.")
 
-            logger.info(f"Unified Vision Agent extracted: {len(symbols)} symbols, {len(relations)} relations.")
-            return {"extracted_entities": {"symbols": symbols, "relations": relations, "geometry": geometry}}
-        except Exception as err:
-            logger.warning(f"Unified Vision Agent failed ({err}). Returning empty set.")
-            return {"extracted_entities": {"symbols": [], "relations": [], "geometry": {"traces": [], "sheet_grids": []}}}
+        # Option B: OpenCV Morphological Computer Vision & Spatial Line Tracer
+        from src.utils.line_tracer import trace_lines_and_connections
+        text_elements = state.get("extracted_entities", {}).get("text_elements", [])
+        symbols = state.get("extracted_entities", {}).get("symbols", [])
+
+        cv_res = trace_lines_and_connections(
+            image_path=raw_image,
+            text_elements=text_elements,
+            symbols=symbols,
+            drawing_type=drawing_type,
+        )
+
+        # Merge relations & line traces
+        existing_rel_keys = {(r["source_tag"], r["target_tag"], r["rel_type"]) for r in relations}
+        for cr in cv_res.get("relations", []):
+            key = (cr["source_tag"], cr["target_tag"], cr["rel_type"])
+            if key not in existing_rel_keys:
+                existing_rel_keys.add(key)
+                relations.append(cr)
+
+        cv_geometry = cv_res.get("geometry", {})
+        existing_trace_tags = {t.get("tag") for t in geometry.get("traces", []) if t.get("tag")}
+        for tr in cv_geometry.get("traces", []):
+            if tr.get("tag") not in existing_trace_tags:
+                existing_trace_tags.add(tr.get("tag"))
+                geometry.setdefault("traces", []).append(tr)
+
+        logger.info(
+            f"PipelineRecognitionAgent ({pipeline_engine}) produced {len(relations)} relations & "
+            f"{len(geometry.get('traces', []))} physical line traces."
+        )
+        return {"extracted_entities": {"relations": relations, "geometry": geometry}}

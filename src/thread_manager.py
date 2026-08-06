@@ -113,12 +113,13 @@ def _run_workflow_worker(thread_id: str, initial_state: GraphState, cancel_event
         app = workflow.compile()
 
         step_progress_map = {
-            "ingest": (0.20, "Document Ingestion & Page Rasterization"),
-            "context_loader": (0.30, "Loading Reference Context & Specs"),
-            "supervisor": (0.40, "Supervisor Agent Strategy Dispatch"),
-            "text_detection": (0.55, "Layer 1 OCR & Layer 2 Reasoning Engine"),
-            "unified_vision": (0.65, "Unified Vision Symbol & Geometry Analysis"),
-            "compiler": (0.75, "Universal Engineering Object Compiler"),
+            "ingest": (0.15, "Document Ingestion & Page Rasterization"),
+            "context_loader": (0.25, "Loading Reference Context & Specs"),
+            "supervisor": (0.35, "Supervisor Agent Strategy Dispatch"),
+            "text_recognition": (0.50, "Text & Tag Recognition (OCR / Layout VL)"),
+            "symbol_recognition": (0.62, "ISA-5.1 Symbol & Component Detection (RF-DETR / VLM)"),
+            "pipeline_recognition": (0.70, "Pipeline & Topological Linkage Tracing"),
+            "compiler": (0.78, "Universal Engineering Object Compiler"),
             "validation": (0.85, "Quality Assurance Rules Validation"),
             "completeness": (0.90, "Evaluating Graph Completeness"),
             "re_extractor": (0.93, "Focused Visual Re-Extraction"),

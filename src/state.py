@@ -60,11 +60,17 @@ class GraphState(TypedDict):
     re_extraction_count: int
     max_re_extractions: int
     
-    # Selected Layer 1 OCR Engine choice ('paddle', 'pdf_text', 'gemini_ocr', 'qwen_ocr', 'got-ocr')
+    # Selected Layer 1 OCR Engine choice ('paddle', 'pdf_text', 'paddle_vl', 'llamaparse', 'gemini_ocr', 'qwen_ocr', 'qwen_37_ocr')
     ocr_engine: Optional[str]
     
-    # Selected Layer 2 Reasoning Engine choice ('rule_based', 'qwen', 'gemini', 'openai')
+    # Selected Layer 2 Reasoning Engine choice ('rule_based', 'qwen', 'qwen_37', 'gemini', 'openai')
     reasoning_engine: Optional[str]
+
+    # Selected Symbol Recognition Engine choice ('vlm', 'glm_rfdetr', 'local')
+    symbol_engine: Optional[str]
+
+    # Selected Pipeline Recognition Engine choice ('cv_vlm_tracer', 'vlm_tracer', 'proximity_tracer')
+    pipeline_engine: Optional[str]
     
     # Custom Provider LLM Settings (for Qwen 2.5, Gemini, OpenAI, Ollama, Groq, vLLM)
     llm_provider: Optional[str]

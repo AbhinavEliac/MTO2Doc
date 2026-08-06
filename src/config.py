@@ -11,10 +11,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY", os.getenv("OPENROUTER_API_KEY", os.getenv("DASHSCOPE_API_KEY", os.getenv("OPENAI_API_KEY", ""))))
+PATHNOVO_API_KEY = os.getenv("PATHNOVO_API_KEY", "")
 
 # API Endpoints
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://openrouter.ai/api/v1")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+PATHNOVO_BASE_URL = os.getenv("PATHNOVO_BASE_URL", "https://api.pathnovo.com/v1/pid/extract")
 
 # Model configurations
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")

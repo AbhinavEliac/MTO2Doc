@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from src.agents.base import BaseAgent
 from src.state import GraphState
@@ -38,20 +38,16 @@ class SupervisorAgent(BaseAgent):
             
         primary_page = rasterized_pages[0]
         
-        use_mocks = state.get("use_mocks", True)
-        if use_mocks:
-            logger.info("Demo Mock Fallbacks are ENABLED. Skipping visual layout segmentation.")
-            segmentation = LayoutSegmentation(
-                major_regions=[
-                    GridCoordinate(label="B5", ymin=0.1, xmin=0.3, ymax=0.5, xmax=0.6),
-                    GridCoordinate(label="C9", ymin=0.2, xmin=0.6, ymax=0.6, xmax=0.9),
-                    GridCoordinate(label="F3", ymin=0.5, xmin=0.1, ymax=0.8, xmax=0.4)
-                ],
-                legend_region=GridCoordinate(label="Notes", ymin=0.7, xmin=0.0, ymax=1.0, xmax=0.3),
-                title_block_region=GridCoordinate(label="TitleBlock", ymin=0.8, xmin=0.7, ymax=1.0, xmax=1.0)
-            )
-        elif state.get("local_mode", False):
-            logger.info("Local Mode ENABLED. Using default grid layout coordinates (no LLM).")
+        use_mocks = state.get("use_mocks", False)
+        local_mode = state.get("local_mode", False)
+        ocr_engine = state.get("ocr_engine", "paddle")
+        provider = state.get("llm_provider")
+        model_name = state.get("llm_model")
+        api_key = state.get("llm_api_key")
+        base_url = state.get("llm_base_url")
+
+        if use_mocks or local_mode or ocr_engine in ("paddle", "pdf_text", "pathnovo_api", "pathnovo"):
+            logger.info("Fast/Local Mode ENABLED in Supervisor. Using default grid layout coordinates (0.001s).")
             segmentation = LayoutSegmentation(
                 major_regions=[
                     GridCoordinate(label="A-C_left",   ymin=0.0,  xmin=0.0,  ymax=0.35, xmax=0.5),
@@ -62,13 +58,16 @@ class SupervisorAgent(BaseAgent):
                 title_block_region=GridCoordinate(label="TitleBlock", ymin=0.82, xmin=0.65, ymax=1.0, xmax=1.0)
             )
         else:
-            segmentation = self._segment_layout_via_vision(primary_page)
+            segmentation = self._segment_layout_via_vision(
+                primary_page,
+                provider=provider,
+                model_name=model_name,
+                api_key=api_key,
+                base_url=base_url,
+            )
         
         # Prepare sub-tasks for parallel vision agents
-        # We can store the visual zones in state so parallel nodes know what crops to check
         grid_regions = [region.model_dump() for region in segmentation.major_regions]
-        
-        # Merge grid division layout mapping to downstream agents
         metadata["grid_segmentation"] = segmentation.model_dump()
         
         return {
@@ -76,9 +75,16 @@ class SupervisorAgent(BaseAgent):
             "revision_history": state.get("revision_history", []) + [{"action": "Segmented drawing grid layout"}]
         }
 
-    def _segment_layout_via_vision(self, image_path: str) -> LayoutSegmentation:
+    def _segment_layout_via_vision(
+        self,
+        image_path: str,
+        provider: Optional[str] = None,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> LayoutSegmentation:
         """
-        Invokes Gemini Vision to identify layout margins and divide the drawing.
+        Invokes Vision API to identify layout margins and divide the drawing.
         """
         system_instruction = (
             "You are an expert design engineer. Analyze the border grids of the P&ID drawing sheet "
@@ -86,13 +92,8 @@ class SupervisorAgent(BaseAgent):
         )
         
         prompt = (
-            "Look at the drawing boundaries. There are alphabetical labels (A to J) on the left/right "
-            "and numbers (1 to 12) on the top/bottom. Identify the normalized bounding boxes [ymin, xmin, ymax, xmax] "
-            "for the following:\n"
-            "- Three major grid cells containing high-density equipment/lines (e.g. where compressors or scrubbers sit)\n"
-            "- The legend and notes block region\n"
-            "- The bottom-right title block region\n"
-            "Return normalized coordinates in the range [0.0 - 1.0]."
+            "Look at the drawing boundaries. Identify the normalized bounding boxes [ymin, xmin, ymax, xmax] "
+            "for the three major grid cells containing high-density equipment/lines, legend region, and title block region."
         )
         
         try:
@@ -100,7 +101,11 @@ class SupervisorAgent(BaseAgent):
                 schema=LayoutSegmentation,
                 prompt=prompt,
                 system_instruction=system_instruction,
-                image_path=image_path
+                image_path=image_path,
+                provider=provider,
+                model_name=model_name,
+                api_key=api_key,
+                base_url=base_url,
             )
         except Exception as e:
             logger.error(f"Supervisor layout segmentation failed: {e}. Using fallback coordinates.")

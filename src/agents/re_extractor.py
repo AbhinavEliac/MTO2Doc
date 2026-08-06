@@ -38,39 +38,38 @@ class ReExtractorAgent(BaseAgent):
         new_symbols = []
         new_relations = []
         
-        for idx, item in enumerate(missing):
+        use_mocks = state.get("use_mocks", False)
+        local_mode = state.get("local_mode", False)
+        provider = state.get("llm_provider")
+        model_name = state.get("llm_model")
+        api_key = state.get("llm_api_key")
+        base_url = state.get("llm_base_url")
+
+        # Prepare crops (cap at top 5 to prevent latency explosion)
+        crop_tasks = []
+        for idx, item in enumerate(missing[:5]):
             zone = item["grid_zone"]
             box = item["coordinates"]
             target = item["target_tag"]
             item_type = item["item_type"]
-            
-            logger.info(f"Processing re-extraction crop for {target} ({item_type}) in grid zone {zone}...")
-            
-            # Crop image visually
+
             crop_path = None
             if primary_page and os.path.exists(primary_page):
                 output_dir = os.path.join(os.path.dirname(primary_page), "crops")
                 os.makedirs(output_dir, exist_ok=True)
                 crop_path = os.path.join(output_dir, f"crop_{zone}_{idx}.png")
                 crop_normalized_box(primary_page, box, crop_path)
-            
-            # Pace requests sequentially to respect rate limits
-            if idx > 0:
-                import time
-                logger.info("Pacing re-extraction: Sleeping 3 seconds between crop requests...")
-                time.sleep(3)
-                
-            # Execute Gemini Vision crop extraction
-            use_mocks = state.get("use_mocks", False)
-            local_mode = state.get("local_mode", False)
-            provider = state.get("llm_provider")
-            model_name = state.get("llm_model")
-            api_key = state.get("llm_api_key")
-            base_url = state.get("llm_base_url")
 
-            re_extracted_items = self._extract_from_crop(
-                crop_path=crop_path,
-                missing_item=item,
+            crop_tasks.append((crop_path, item, box))
+
+        # Parallel extraction using ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _process_single_crop(task_tuple):
+            c_path, m_item, b_box = task_tuple
+            items = self._extract_from_crop(
+                crop_path=c_path,
+                missing_item=m_item,
                 use_mocks=use_mocks,
                 local_mode=local_mode,
                 provider=provider,
@@ -78,6 +77,16 @@ class ReExtractorAgent(BaseAgent):
                 api_key=api_key,
                 base_url=base_url,
             )
+            return items, b_box
+
+        with ThreadPoolExecutor(max_workers=min(4, max(1, len(crop_tasks)))) as executor:
+            future_to_crop = {executor.submit(_process_single_crop, task): task for task in crop_tasks}
+            for future in as_completed(future_to_crop):
+                try:
+                    re_extracted_items, box = future.result()
+                except Exception as c_err:
+                    logger.warning(f"Re-extraction crop failed ({c_err}).")
+                    continue
 
             
             # Process and map back to state entities
