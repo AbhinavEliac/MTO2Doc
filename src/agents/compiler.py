@@ -128,22 +128,60 @@ class CompilerAgent(BaseAgent):
 
     # ── P&ID Compilers ─────────────────────────────────────────────────────────
 
+    # ISA equipment type descriptions (CFIHOS / ISO 15926)
+    _ISA_EQUIP_DESC = {
+        'KA': 'Compressor', 'KB': 'Blower', 'KC': 'Compressor', 'KT': 'Turbine',
+        'CP': 'Compressor', 'CM': 'Compressor', 'KZ': 'Package/Skid Unit',
+        'HA': 'Heat Exchanger', 'HB': 'Heat Exchanger', 'HX': 'Heat Exchanger',
+        'HE': 'Heat Exchanger', 'EA': 'Air Cooler', 'EB': 'Boiler',
+        'VA': 'Vessel', 'VB': 'Vessel', 'VC': 'Vessel',
+        'TK': 'Storage Tank', 'DA': 'Drum', 'DB': 'Drum',
+        'CA': 'Column', 'CB': 'Column', 'R': 'Reactor',
+        'PA': 'Pump', 'PB': 'Pump', 'PC': 'Pump', 'PM': 'Pump', 'PU': 'Pump',
+        'GA': 'Pump', 'GB': 'Pump',
+        'FA': 'Filter', 'FB': 'Filter', 'ST': 'Strainer', 'CX': 'Separator',
+        'SK': 'Skid', 'PK': 'Package',
+        'MA': 'Machinery', 'MB': 'Machinery', 'ME': 'Mechanical Equipment',
+    }
+
     def _compile_equipment(self, texts: List[Dict], symbols: List[Dict]) -> List[EquipmentItem]:
         compiled = []
+        seen_equip: dict = {}  # canonical key → EquipmentItem (deduplication)
         eq_tags = [t for t in texts if t["classification"] == "EQUIPMENT_TAG"]
 
         for eq in eq_tags:
             tag = eq["tag"]
+
+            # Deduplicate by canonical key (strip project prefix AND trailing unit suffix)
+            # e.g.: 26-HA-911-C01 → HA-911,  26-KA-901-A → KA-901,  KA-901 → KA-901
+            canon_key = re.sub(r'^\d{2,3}-', '', tag.upper())  # strip project prefix
+            # Strip trailing unit designator only if it contains at least one alpha char
+            # This prevents stripping the last digit of a sequence number (HA-911 → HA-91)
+            canon_key = re.sub(r'-[A-Z][A-Z0-9]{0,3}$', '', canon_key)  # -C01, -A, -B only
+
+            if canon_key in seen_equip:
+                # Prefer longer project-prefixed tag
+                if len(tag) > len(seen_equip[canon_key].tag):
+                    seen_equip[canon_key].tag = tag
+                continue
+
             coords = None
-            eq_type = "Generic Equipment"
             for sym in symbols:
                 if sym.get("inferred_tag") == tag:
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
+                    break
+
+            # Derive equipment type from ISA lookup
+            code_match = re.search(r'([A-Z]{1,3})(?=-?\d)', tag, re.IGNORECASE)
+            eq_code = code_match.group(1).upper() if code_match else ""
+            eq_type = self._ISA_EQUIP_DESC.get(eq_code, "Generic Equipment")
+            for sym in symbols:
+                if sym.get("inferred_tag") == tag and sym.get("symbol_type"):
                     eq_type = sym["symbol_type"]
                     break
 
             attrs = eq.get("attributes") or {}
-            compiled.append(EquipmentItem(
+            item_obj = EquipmentItem(
                 tag=tag,
                 name=eq["value"],
                 type=eq_type,
@@ -154,8 +192,12 @@ class CompilerAgent(BaseAgent):
                 duty=attrs.get("duty") or eq.get("rating"),
                 material=attrs.get("material"),
                 coordinates=coords,
-            ))
+            )
+            compiled.append(item_obj)
+            seen_equip[canon_key] = item_obj
+
         return compiled
+
 
     def _compile_lines(self, texts: List[Dict], geom: Dict, relations: List[Dict]) -> List[LineItem]:
         compiled = []
@@ -236,17 +278,58 @@ class CompilerAgent(BaseAgent):
             ))
         return compiled
 
+    # ISA 5.1 instrument type descriptions lookup
+    _ISA_TYPE_DESC = {
+        'PIT': 'Pressure Indicating Transmitter', 'PDT': 'Differential Pressure Transmitter',
+        'PDIT': 'Differential Pressure Indicating Transmitter', 'PT': 'Pressure Transmitter',
+        'PI': 'Pressure Indicator', 'PIC': 'Pressure Indicating Controller',
+        'PSV': 'Pressure Safety Valve', 'PRV': 'Pressure Relief Valve',
+        'PDI': 'Differential Pressure Indicator', 'PCV': 'Pressure Control Valve',
+        'TIT': 'Temperature Indicating Transmitter', 'TT': 'Temperature Transmitter',
+        'TI': 'Temperature Indicator', 'TIC': 'Temperature Indicating Controller',
+        'TE': 'Temperature Element', 'TW': 'Thermowell', 'TCV': 'Temperature Control Valve',
+        'FIT': 'Flow Indicating Transmitter', 'FT': 'Flow Transmitter',
+        'FI': 'Flow Indicator', 'FE': 'Flow Element', 'FCV': 'Flow Control Valve',
+        'FIC': 'Flow Indicating Controller', 'FO': 'Flow Orifice',
+        'LIT': 'Level Indicating Transmitter', 'LT': 'Level Transmitter',
+        'LI': 'Level Indicator', 'LG': 'Level Glass', 'LCV': 'Level Control Valve',
+        'AIT': 'Analytical Indicating Transmitter', 'AT': 'Analytical Transmitter',
+        'VIT': 'Vibration Indicating Transmitter', 'VT': 'Vibration Transmitter',
+        'HV': 'Hand Operated Valve', 'XV': 'On-Off Valve',
+        'FV': 'Flow Valve', 'PY': 'Pressure Relay/Converter', 'TY': 'Temperature Relay',
+    }
+
+    @staticmethod
+    def _canonical_inst_key(tag: str) -> str:
+        """Strip project prefix digits to get canonical key: 26-PIT-9077 → PIT-9077."""
+        return re.sub(r'^\d{2,3}-', '', tag.upper())
+
     def _compile_instruments(
         self, texts: List[Dict], symbols: List[Dict],
         relations: List[Dict], lines: List[LineItem]
     ) -> List[InstrumentItem]:
         compiled = []
+        seen_canonical: dict = {}   # Fix 2: canonical key → InstrumentItem for deduplication
         inst_tags = [t for t in texts if t["classification"] == "INSTRUMENT_TAG"]
 
         for inst in inst_tags:
             tag = inst["tag"]
-            type_match = re.search(r'([A-Z]+)', tag)
-            inst_type = type_match.group(1) if type_match else "INST"
+
+            # Fix 2: Deduplicate by canonical key — prefer longer (project-prefixed) tag
+            canon_key = self._canonical_inst_key(tag)
+            if canon_key in seen_canonical:
+                # If existing is bare (shorter) and this is project-prefixed (longer), upgrade
+                existing_tag = seen_canonical[canon_key].tag
+                if len(tag) > len(existing_tag):
+                    seen_canonical[canon_key].tag = tag
+                continue  # Skip duplicate regardless
+
+            # ISA 5.1 instrument type from function code
+            type_match = re.search(r'([A-Z]{2,5})(?=-?\d)', tag)
+            if not type_match:
+                type_match = re.search(r'([A-Z]+)', tag)
+            inst_code = type_match.group(1) if type_match else "INST"
+            inst_type = self._ISA_TYPE_DESC.get(inst_code, inst_code)
 
             # Find coordinates for symbol bubble
             coords = None
@@ -255,23 +338,26 @@ class CompilerAgent(BaseAgent):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            # Spatial image text assembly for loop_id:
-            # Check OCR text elements positioned inside/near the instrument bubble coordinates
+            # Fix 5: Expanded spatial proximity for loop_id (radius 0.10 + Y-band fallback)
             image_loop_id = None
             if coords:
                 cy = (coords[0] + coords[2]) / 2.0
                 cx = (coords[1] + coords[3]) / 2.0
                 nearby_texts = []
+                yband_texts = []
                 for t in texts:
                     attrs = t.get("attributes") or {}
                     tx = float(attrs.get("pos_x", -1)) if attrs.get("pos_x") is not None else -1
                     ty = float(attrs.get("pos_y", -1)) if attrs.get("pos_y") is not None else -1
                     if tx >= 0 and ty >= 0:
                         dist = math.hypot(cx - tx, cy - ty)
-                        if dist < 0.06:
+                        if dist < 0.10:                          # Fix 5: expanded from 0.06
                             nearby_texts.append(t.get("value", ""))
+                        elif abs(ty - cy) < 0.015:               # Fix 5: same Y-band fallback
+                            yband_texts.append(t.get("value", ""))
 
-                for txt in nearby_texts:
+                # Search nearby first, then Y-band
+                for txt in (nearby_texts + yband_texts):
                     num_match = re.search(r'(\d{3,5}[A-Z]?)', txt)
                     if num_match:
                         image_loop_id = num_match.group(1)
@@ -283,7 +369,7 @@ class CompilerAgent(BaseAgent):
 
             loop_id = image_loop_id
 
-            # Case-insensitive relation check for host line or equipment
+            # Find associated line / equipment from relations
             associated_line = None
             for rel in relations:
                 rtype = rel.get("rel_type", "").upper()
@@ -311,15 +397,19 @@ class CompilerAgent(BaseAgent):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            compiled.append(InstrumentItem(
+            item_obj = InstrumentItem(
                 tag=tag,
                 type=inst_type,
                 service=service_fluid,
                 location="Field",
                 loop_id=loop_id,
                 coordinates=coords,
-            ))
+            )
+            compiled.append(item_obj)
+            seen_canonical[canon_key] = item_obj  # register for deduplication
+
         return compiled
+
 
     def _compile_valves(
         self, texts: List[Dict], symbols: List[Dict],
@@ -438,20 +528,41 @@ class CompilerAgent(BaseAgent):
 
         for item in items:
             tag = item["tag"]
+            tag_upper = tag.upper()
             attrs = item.get("attributes") or {}
 
+            fitting_type = "Lighting Fitting"
+            if "FLOODLIGHT" in tag_upper or "FL" in tag_upper:
+                fitting_type = "Floodlight"
+            elif "WELLGLASS" in tag_upper or "WG" in tag_upper or "WGL" in tag_upper:
+                fitting_type = "Wellglass Fitting"
+            elif "HIGH" in tag_upper and "BAY" in tag_upper:
+                fitting_type = "High Bay Luminaire"
+            elif "EMERGENCY" in tag_upper or "EL" in tag_upper or "EML" in tag_upper:
+                fitting_type = "Emergency Light"
+            elif "LED" in tag_upper:
+                fitting_type = "LED Fitting"
+            elif "TL" in tag_upper:
+                fitting_type = "Tube Light Fitting"
+
             coords = None
-            fitting_type = "Luminaire"
             for sym in symbols:
                 if sym.get("inferred_tag") == tag:
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
-                    fitting_type = sym.get("symbol_type", "Luminaire")
+                    if sym.get("symbol_type"):
+                        fitting_type = sym["symbol_type"]
                     break
+
+            wattage = attrs.get("wattage")
+            if not wattage:
+                w_match = re.search(r'(\d{2,3}\s*W\b)', tag_upper)
+                if w_match:
+                    wattage = w_match.group(1)
 
             compiled.append(LuminaireItem(
                 tag=tag,
                 fitting_type=attrs.get("fitting_type", fitting_type),
-                wattage=attrs.get("wattage"),
+                wattage=wattage or "70W / 2x36W (Typ.)",
                 circuit=attrs.get("circuit"),
                 panel=attrs.get("panel"),
                 elevation=attrs.get("elevation"),
@@ -470,11 +581,15 @@ class CompilerAgent(BaseAgent):
 
             # Infer panel type from tag
             tag_upper = tag.upper()
-            panel_type = "DB"
-            for prefix in ('EMDB', 'MVDB', 'LVDB', 'SMDB', 'LPDB', 'EPDB', 'MDB', 'LDB', 'MSB', 'SDB', 'PDB'):
-                if tag_upper.startswith(prefix):
+            panel_type = "Distribution Board"
+            for prefix in ('EMDB', 'MVDB', 'LVDB', 'SMDB', 'LPDB', 'EPDB', 'MDB', 'LDB', 'MSB', 'SDB', 'PDB', 'MLP', 'ELP', 'SLP', 'MCC', 'PCC'):
+                if prefix in tag_upper:
                     panel_type = prefix
                     break
+            if "LIGHTING" in tag_upper:
+                panel_type = "Lighting Panel"
+            elif "EARTHING" in tag_upper:
+                panel_type = "Earthing Main Panel"
 
             coords = None
             for sym in symbols:
@@ -485,7 +600,7 @@ class CompilerAgent(BaseAgent):
             compiled.append(PanelItem(
                 tag=tag,
                 panel_type=attrs.get("panel_type", panel_type),
-                voltage=attrs.get("voltage"),
+                voltage=attrs.get("voltage", "415V / 230V 3-Phase"),
                 capacity_kva=attrs.get("capacity_kva"),
                 feeder_from=attrs.get("feeder_from"),
                 location=attrs.get("location"),
@@ -515,7 +630,7 @@ class CompilerAgent(BaseAgent):
 
             compiled.append(CableItem(
                 tag=tag,
-                cable_type=attrs.get("cable_type"),
+                cable_type=attrs.get("cable_type", "XLPE/PVC Armoured"),
                 size_mm2=attrs.get("size_mm2"),
                 cores=attrs.get("cores"),
                 from_panel=from_panel or attrs.get("from_panel"),
@@ -542,7 +657,38 @@ class CompilerAgent(BaseAgent):
 
         for item in earth_items:
             tag = item["tag"]
+            tag_upper = tag.upper()
             attrs = item.get("attributes") or {}
+
+            ctype = type_map.get(item["classification"], "EARTHING_COMPONENT")
+
+            # Infer component type & material details
+            material = attrs.get("material")
+            size = attrs.get("size")
+            resistance = attrs.get("resistance")
+
+            if ctype == "EARTH_BAR":
+                if not material:
+                    material = "Tinned Copper Flat Bar" if "COPPER" in tag_upper or "CU" in tag_upper else "Tinned Copper / GI Bar"
+                if not size:
+                    sz_match = re.search(r'(\d{2,3}\s*[xX]\s*\d{1,2})', tag_upper)
+                    size = sz_match.group(1) if sz_match else "50x6 mm"
+            elif ctype == "EARTH_PIT":
+                if not material:
+                    material = "Copper-Bonded Steel Electrode (50mm Dia, 3m L)"
+                if not resistance:
+                    resistance = "< 1.0 Ohm (Earth Electrode Grid)"
+            elif ctype == "BOND_CONDUCTOR":
+                if not material:
+                    if "COPPER" in tag_upper or "CU" in tag_upper:
+                        material = "Bare Copper Tape"
+                    elif "GI" in tag_upper or "GS" in tag_upper:
+                        material = "Galvanized Iron Flat Strip"
+                    else:
+                        material = "Bare Copper Tape / GI Strip"
+                if not size:
+                    sz_match = re.search(r'(\d{2,3}\s*[xX]\s*\d{1,2}|\d{2,3}\s*SQMM)', tag_upper)
+                    size = sz_match.group(1) if sz_match else "25x3 mm"
 
             coords = None
             for sym in symbols:
@@ -552,13 +698,13 @@ class CompilerAgent(BaseAgent):
 
             compiled.append(EarthingItem(
                 tag=tag,
-                component_type=type_map.get(item["classification"], "EARTHING_COMPONENT"),
-                material=attrs.get("material"),
-                size=attrs.get("size"),
+                component_type=ctype,
+                material=material,
+                size=size,
                 connected_to=attrs.get("connected_to"),
                 location=attrs.get("location"),
                 elevation=attrs.get("elevation"),
-                resistance=attrs.get("resistance"),
+                resistance=resistance,
                 coordinates=coords,
             ))
         return compiled

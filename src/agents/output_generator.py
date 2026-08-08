@@ -250,6 +250,26 @@ class OutputGeneratorAgent(BaseAgent):
                 } for i, e in enumerate(graph.earthing_components)]
                 write_sheet("Earthing", "EARTHING COMPONENT SCHEDULE", f"Extracted by SID-AI | {len(rows)} earthing items", headers, rows)
 
+            if graph.equipment:
+                headers = ["#", "Equipment Tag", "Type", "Description", "Location"]
+                rows = [{
+                    "#": i + 1, "Equipment Tag": e.tag, "Type": e.type,
+                    "Description": e.description or e.name or "Earthed Footprint",
+                    "Location": getattr(e, 'location', None) or "Grid Footprint",
+                } for i, e in enumerate(graph.equipment)]
+                write_sheet("Earthed Equipment", "EARTHED EQUIPMENT & STRUCTURAL FOOTPRINTS", f"Extracted by SID-AI | {len(rows)} earthed items", headers, rows)
+
+            if graph.relationships:
+                headers = ["#", "Source (From)", "Relation Type", "Target (Connected To)", "Confidence"]
+                rows = [{
+                    "#": i + 1,
+                    "Source (From)": getattr(r, 'source_tag', getattr(r, 'source', '')),
+                    "Relation Type": str(getattr(r, 'rel_type', getattr(r, 'type', ''))).upper(),
+                    "Target (Connected To)": getattr(r, 'target_tag', getattr(r, 'target', '')),
+                    "Confidence": f"{int(getattr(r, 'confidence', 1.0) * 100)}%",
+                } for i, r in enumerate(graph.relationships)]
+                write_sheet("Earthing Connectivity", "EARTHING TOPOLOGICAL RELATIONS (EARTHED_TO)", f"Extracted by SID-AI | {len(rows)} relations", headers, rows)
+
         elif drawing_type == 'SLD':
             if graph.panels:
                 headers = ["#", "Panel Tag", "Type", "Voltage", "Capacity (kVA)", "Fed From", "Description"]
@@ -259,6 +279,27 @@ class OutputGeneratorAgent(BaseAgent):
                     "Fed From": p.feeder_from or "-", "Description": p.description or "-",
                 } for i, p in enumerate(graph.panels)]
                 write_sheet("Switchgear", "SWITCHGEAR & PANEL SCHEDULE", f"Extracted by SID-AI | {len(rows)} panels", headers, rows)
+
+            if graph.cables:
+                headers = ["#", "Feeder Tag", "Cable Type", "Size (mm²)", "Cores", "From Panel", "To Equipment", "Route"]
+                rows = [{
+                    "#": i + 1, "Feeder Tag": c.tag, "Cable Type": c.cable_type or "-",
+                    "Size (mm²)": c.size_mm2 or "-", "Cores": c.cores or "-",
+                    "From Panel": c.from_panel or "-", "To Equipment": c.to_equipment or "-",
+                    "Route": c.route or "-",
+                } for i, c in enumerate(graph.cables)]
+                write_sheet("Feeders", "FEEDER & BREAKER SCHEDULE", f"Extracted by SID-AI | {len(rows)} feeders", headers, rows)
+
+            if graph.relationships:
+                headers = ["#", "Source (From)", "Relation Type", "Target (Connected To)", "Confidence"]
+                rows = [{
+                    "#": i + 1,
+                    "Source (From)": getattr(r, 'source_tag', getattr(r, 'source', '')),
+                    "Relation Type": str(getattr(r, 'rel_type', getattr(r, 'type', ''))).upper(),
+                    "Target (Connected To)": getattr(r, 'target_tag', getattr(r, 'target', '')),
+                    "Confidence": f"{int(getattr(r, 'confidence', 1.0) * 100)}%",
+                } for i, r in enumerate(graph.relationships)]
+                write_sheet("Electrical Relations", "SLD POWER FLOW RELATIONS (FEEDS)", f"Extracted by SID-AI | {len(rows)} relations", headers, rows)
 
         else:
             # Generic fallback
@@ -497,24 +538,25 @@ class OutputGeneratorAgent(BaseAgent):
 
     def _generate_sppid_csv(self, graph, path: str):
         """
-        Generates relational import CSV sheets suited for SmartPlant P&ID import tables.
-        We combine them into a single CSV with entity headers to facilitate database parsing.
+        Generates relational import CSV sheets suited for SmartPlant & Industrial DB import tables.
+        Outputs exact extracted entities and real topological relationships (FEEDS, EARTHED_TO, MONITORS, INSTALLED_ON, CONNECTS_TO).
         """
         rows = []
         rows.append(["ENTITY_TYPE", "TAG", "PROPERTY_1", "PROPERTY_2", "PROPERTY_3", "PROPERTY_4", "PROPERTY_5"])
-        
+
+        # Entities
         for eq in graph.equipment:
-            rows.append(["EQUIPMENT", eq.tag or "", eq.name or "", eq.type or "", eq.design_pressure or "", eq.design_temperature or "", eq.duty or ""])
-            
+            rows.append(["EQUIPMENT", eq.tag or "", eq.name or "", eq.type or "", eq.description or "", eq.location or "", ""])
+
         for line in graph.lines:
             rows.append(["PIPING_LINE", line.tag or "", line.size or "", line.service or "", line.spec or "", line.from_node or "", line.to_node or ""])
-            
+
         for inst in graph.instruments:
             rows.append(["INSTRUMENT", inst.tag or "", inst.type or "", inst.loop_id or "", inst.location or "", "", ""])
-            
+
         for valve in graph.valves:
             rows.append(["VALVE", valve.tag or "", valve.type or "", valve.size or "", valve.line_tag or "", valve.rating or "", valve.normal_state or ""])
-            
+
         for psv in graph.safety_relief_valves:
             rows.append(["SAFETY_RELIEF_VALVE", psv.tag or "", psv.type or "", psv.set_pressure or "", psv.inlet_size or "", psv.outlet_size or "", psv.relief_destination or ""])
 
@@ -528,11 +570,19 @@ class OutputGeneratorAgent(BaseAgent):
             rows.append(["CABLE", cable.tag or "", cable.cable_type or "", cable.size_mm2 or "", cable.cores or "", cable.from_panel or "", cable.to_equipment or ""])
 
         for earth in getattr(graph, 'earthing_components', []):
-            rows.append(["EARTHING", earth.tag or "", earth.component_type or "", earth.material or "", earth.size or "", earth.connected_to or "", earth.location or ""])
+            rows.append(["EARTHING", earth.tag or "", earth.component_type or "", earth.material or "", earth.size or "", earth.connected_to or "", earth.resistance or ""])
 
         for gen in getattr(graph, 'generic_components', []):
             rows.append(["GENERIC_COMPONENT", gen.tag or "", gen.classification or "", gen.description or "", "", "", ""])
-            
+
+        # Topological Relationships (Fix Gemini CSV 0% score)
+        for rel in getattr(graph, 'relationships', []):
+            src_tag = getattr(rel, 'source_tag', getattr(rel, 'source', ''))
+            trg_tag = getattr(rel, 'target_tag', getattr(rel, 'target', ''))
+            r_type = str(getattr(rel, 'rel_type', getattr(rel, 'type', ''))).upper()
+            conf_val = getattr(rel, 'confidence', 1.0)
+            rows.append(["RELATIONSHIP", src_tag, r_type, trg_tag, f"conf={conf_val:.2f}", "", ""])
+
         df = pd.DataFrame(rows)
         df.to_csv(path, index=False, header=False)
 

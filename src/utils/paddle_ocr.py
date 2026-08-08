@@ -11,6 +11,7 @@ Zero API tokens consumed by any of these methods.
 """
 import logging
 import os
+import re
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,27 @@ def run_pdf_text_extraction(pdf_path: str) -> List[Dict[str, Any]]:
                             "center_x": cx,
                             "center_y": cy,
                         })
+
+            # 3. Spatial vertical assembly for instrument bubbles (code on top, loop number directly below)
+            from src.utils.tag_classifier import _INSTRUMENT_CODES
+            for t1 in word_list:
+                txt1 = t1["text"].upper()
+                if txt1 in _INSTRUMENT_CODES:
+                    x1, y1 = t1["center_x"], t1["center_y"]
+                    for t2 in word_list:
+                        txt2 = t2["text"].upper()
+                        if re.match(r'^\d{3,5}[A-Z]?$', txt2):
+                            x2, y2 = t2["center_x"], t2["center_y"]
+                            # Vertically aligned: same X (+/- 0.02), bottom Y is 0.005 to 0.04 below top Y
+                            if abs(x1 - x2) < 0.02 and 0.005 < (y2 - y1) < 0.04:
+                                joined_tag = f"{txt1}-{txt2}"
+                                items.append({
+                                    "text": joined_tag,
+                                    "confidence": 0.99,
+                                    "bbox": t1["bbox"],
+                                    "center_x": x1,
+                                    "center_y": y1,
+                                })
 
         doc.close()
         if items:

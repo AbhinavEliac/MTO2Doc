@@ -1,15 +1,31 @@
-# Byte-compiled / optimized / DLL files
+# ==============================================================================
+# SID-AI — Universal Engineering Drawing Intelligence Platform
+# Git Ignore Configuration
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Byte-Compiled / Python Runtime Cache
+# ------------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
 
-# Environment variables & secrets (Never commit API keys!)
+# ------------------------------------------------------------------------------
+# 2. Environment Variables, Secrets & API Credentials
+# NEVER COMMIT REAL API KEYS OR PRODUCTION SECRETS TO REPOSITORY!
+# ------------------------------------------------------------------------------
 .env
 .env.local
+.env.development
+.env.test
+.env.production
 .env.*
 !.env.example
 
-# Python virtual environments
+# ------------------------------------------------------------------------------
+# 3. Python Virtual Environments
+# ------------------------------------------------------------------------------
 pid_env/
 venv/
 .venv/
@@ -18,23 +34,52 @@ ENV/
 env.bak/
 venv.bak/
 
-# Runtime outputs & temporary uploaded files
+# ------------------------------------------------------------------------------
+# 4. Storage, Temporary Uploads & Output Deliverables
+# ------------------------------------------------------------------------------
 uploads/
 outputs/
 rasterized/
-*.log
+temp/
+tmp/
+
+# ------------------------------------------------------------------------------
+# 5. Databases, Execution Logs & Runtime Metrics
+# ------------------------------------------------------------------------------
 *.db
+*.sqlite
+*.sqlite3
 extraction_history.db
+*.log
 install_log.txt
 
-# Scratch & debug scripts
+# ------------------------------------------------------------------------------
+# 6. Local Scratchpads & Debugging Scripts
+# ------------------------------------------------------------------------------
 debug_*.py
 scratch/
 
-# OS and IDE files
+# ------------------------------------------------------------------------------
+# 7. IDE & Text Editor Files
+# ------------------------------------------------------------------------------
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ------------------------------------------------------------------------------
+# 8. OS Generated Files
+# ------------------------------------------------------------------------------
 .DS_Store
-.claude/
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini

@@ -191,14 +191,15 @@ class BaseAgent:
                         logger.warning(f"Rate limit hit. Waiting {wait_time:.2f} seconds before retry...")
                         time.sleep(wait_time)
                         delay *= 2
+                        continue
                     else:
                         raise e
                 else:
                     if attempt < max_attempts - 1:
                         time.sleep(1)
+                        continue
                     else:
                         raise e
-                raise e
 
     def invoke_text(
         self,

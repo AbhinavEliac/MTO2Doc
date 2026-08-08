@@ -89,9 +89,34 @@ _EQUIPMENT_CODES = {
     'EC', 'GH', 'GJ', 'KD', 'KE', 'LA', 'LB',
 }
 
-# Generic 1-3 letter + number equipment (e.g., P-101, TK-101, E-201, V-301, C-101, M-101)
+# Equipment prefix allowlist — only known equipment codes to eliminate false positives
+# (line specs like FC11S, GC11S, drawing refs like AB-1234 are excluded)
+_EQUIP_PREFIX_ALLOWLIST = {
+    # Compressors, blowers, turbines, motors
+    'K', 'KA', 'KB', 'KC', 'KT', 'CM', 'CP', 'MT', 'MG',
+    # Heat exchangers, coolers, heaters, furnaces
+    'E', 'EA', 'EB', 'HX', 'HE', 'BA',
+    # Vessels, drums, tanks, columns
+    'V', 'VA', 'VB', 'TK', 'T', 'D', 'DA', 'C', 'R', 'DR',
+    # Pumps
+    'P', 'PA', 'PB', 'PC', 'G', 'GA', 'PM', 'PU',
+    # Filters, separators, strainers
+    'F', 'FA', 'FB', 'ST', 'CX',
+    # Skids, packages
+    'SK', 'PK',
+    # General mechanical
+    'M', 'MA', 'MB', 'U', 'UA', 'W', 'WA',
+}
+
+# Generic 1-3 letter + number equipment — guarded with prefix allowlist
 _GENERIC_EQUIP_PATTERN = re.compile(
     r'\b([A-Z]{1,3}-\d{2,5}[A-Z]?(?:/[A-Z])?)\b', re.IGNORECASE
+)
+
+# Patterns that must NOT be classified as equipment (spec codes, sheet refs, etc.)
+_EQUIP_REJECT_PATTERN = re.compile(
+    r'^(?:FC|GC|AC|AS|VC|SC|DC|WF|PV|VF|VA|HC|RC)[0-9]',  # spec codes
+    re.IGNORECASE
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -110,16 +135,51 @@ _PROJECT_TAG_SEARCH = re.compile(
     re.IGNORECASE
 )
 
-# Bare instrument tags without project prefix: PIT-9062, TIT-9057, PDIT-9054, PDI-9054, TE-101
+# Bare instrument tags without project prefix: PIT-9062, TIT-9057, PDIT-9054, PDI-9054
+# RULES:
+#   1. Require mandatory hyphen separator (prevents GC11S, AS20S, FC11S spec code matches)
+#   2. Require 3+ digit loop numbers (prevents PV-26, VA-26 service-code matches)
+#   3. Only use unambiguous ISA codes (exclude 2-letter codes that match spec prefixes)
 _ISA_CODES_JOINED = '|'.join(sorted(_INSTRUMENT_CODES, key=len, reverse=True))
+# Unambiguous codes only — 3+ letter codes first, then safe 2-letter instrument codes
+# Excludes: AC, AS, GC, FC, SC, VC, DC, WF, RC — these match spec code prefixes
+_ISA_SAFE_CODES = [
+    c for c in sorted(_INSTRUMENT_CODES, key=len, reverse=True)
+    if len(c) >= 3 or c.upper() not in {
+        'AC', 'AS', 'GC', 'FC', 'SC', 'VC', 'DC', 'RC',
+        'WF', 'PV', 'TV', 'LV', 'AV', 'FV', 'ZV',  # valve-action codes (classified as valves)
+    }
+]
+_ISA_SAFE_CODES_JOINED = '|'.join(_ISA_SAFE_CODES)
 _BARE_INSTRUMENT_SEARCH = re.compile(
-    rf'\b((?:{_ISA_CODES_JOINED})-?\d{{2,5}}[A-Z]?)\b',
+    rf'\b((?:{_ISA_SAFE_CODES_JOINED})-\d{{3,5}}[A-Z]?)\b',  # hyphen required, 3+ digits
     re.IGNORECASE
 )
 
-# Valve tags: 26CB9131, 26-CB-9131, 26GB9178, 26-GB-9178, HV-101, XV-201, V-101, MOV-101
+# Pipe spec code pattern — must NEVER be classified as instruments or equipment
+# Matches: GC11S, AS20S, FC11S, AC21S, GC115, AC21 etc.
+_SPEC_CODE_PATTERN = re.compile(
+    r'^(?:GC|AC|AS|FC|VC|SC|DC|WF|RC|CC|SG|CS|AG)[\dA-Z]{2,6}$',
+    re.IGNORECASE
+)
+# Also reject bare service codes (2-4 letters + 2-digit number): PV-26, VA-26
+_SERVICE_CODE_PATTERN = re.compile(
+    r'^[A-Z]{1,4}-\d{2}$',
+    re.IGNORECASE
+)
+
+# Valve tags (ISA 5.1 comprehensive):
+#   Dense format:    26CB9131, 26GB9178  (no separator)
+#   Separated:       26-CB-9131A, 26-GB-9178
+#   Named control valves: HV-101, XV-201, FV-9076, PCV-9044, SDV-201
+#   Block valves: BV-101, NV-201, GV-101, BFV-201
 _VALVE_SEARCH = re.compile(
-    r'\b(\d{2}-?[A-Z]{2}-?\d{4,6}|(?:HV|XV|CV|PCV|FCV|TCV|LCV|EV|MOV|SDV|BDV|FV|UV|PV|TV|LV|AV|ZV|V)-\d{2,5}[A-Z]?)\b',
+    r'\b('
+    r'\d{2}-?[A-Z]{2}-?\d{4,6}[A-Z]?'                           # 26CB9131, 26-CB-9131A
+    r'|(?:HV|XV|CV|PCV|FCV|TCV|LCV|EV|MOV|SDV|BDV|FV|UV|TV|LV|AV|ZV)[-–]\d{2,5}[A-Z]?'  # HV-101, SDV-201
+    r'|(?:BV|NV|GV|BFV|SBV|NGV|PLV|RV|PRV)[-–]\d{2,5}[A-Z]?'  # BV-101, NV-201
+    r'|\bV-\d{3,5}[A-Z]?'                                         # V-101
+    r')\b',
     re.IGNORECASE
 )
 
@@ -139,9 +199,21 @@ _RATING_SEARCH = re.compile(
 # Electrical Layout Patterns
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Luminaire tags: L-01, LS-201, TL-101, FL-01
+# Luminaire / Lighting Fitting tags: L-01, LS-201, TL-101, FL-01, FLOODLIGHT, WELLGLASS, HIGHBAY
 _LUMINAIRE_SEARCH = re.compile(
-    r'\b((?:TL|FL|EL|SL|LS?|WL)-\d{1,4}[A-Z]?)\b', re.IGNORECASE
+    r'\b('
+    r'(?:TL|FL|EL|SL|LS|WL|LT|LP|LGT|FIX|LED|EML|WGL)[-–]?\d{1,4}[A-Z]?'
+    r'|L-\d{1,4}[A-Z]?'
+    r'|FLOODLIGHT(?:-?\d{1,4}[A-Z]?)?'
+    r'|WELLGLASS(?:-?\d{1,4}[A-Z]?)?'
+    r'|LUMINAIRE(?:-?\d{1,4}[A-Z]?)?'
+    r'|LIGHT\s+FIXTURE(?:-?\d{1,4}[A-Z]?)?'
+    r'|LIGHTING\s+FITTING(?:-?\d{1,4}[A-Z]?)?'
+    r'|HIGH\s*BAY(?:-?\d{1,4}[A-Z]?)?'
+    r'|LOW\s*BAY(?:-?\d{1,4}[A-Z]?)?'
+    r'|EMERGENCY\s+LIGHT(?:-?\d{1,4}[A-Z]?)?'
+    r')\b',
+    re.IGNORECASE
 )
 
 # Elevation / level labels: EL.101.445, EL 100.000, TL 101.445
@@ -150,28 +222,107 @@ _ELEVATION_SEARCH = re.compile(
     re.IGNORECASE
 )
 
-# Panel / distribution board tags: DB-01, MDB-A, LDB-3, LPDB, EMDB, MVDB
+# Panel / distribution board tags: DB-01, MDB-A, LDB-3, LPDB-01, EPDB, MVDB, LIGHTING PANEL, SWITCHBOARD
 _PANEL_SEARCH = re.compile(
-    r'\b((?:EMDB|MVDB|LVDB|LPDB|EPDB|MDB|LDB|SDB|DB|PDB|NDB|MSB|LSB|ESB|SMDB)\s*[-–/]?\s*[A-Z0-9]{0,4})\b',
+    r'\b('
+    r'(?:EMDB|MVDB|LVDB|LPDB|EPDB|MDB|LDB|SDB|DB|PDB|NDB|MSB|LSB|ESB|SMDB|MLP|ELP|SLP|LP|MCC|PCC|PDP|PDPB)'
+    r'\s*[-–/]?\s*[A-Z0-9]{1,6}'
+    r'|LIGHTING\s+PANEL(?:\s*[-–/]?\s*[A-Z0-9]{1,4})?'
+    r'|DISTRIBUTION\s+BOARD(?:\s*[-–/]?\s*[A-Z0-9]{1,4})?'
+    r'|EARTHING\s+PANEL(?:\s*[-–/]?\s*[A-Z0-9]{1,4})?'
+    r'|SWITCHBOARD(?:\s*[-–/]?\s*[A-Z0-9]{1,4})?'
+    r'|SWITCHGEAR(?:\s*[-–/]?\s*[A-Z0-9]{1,4})?'
+    r')\b',
     re.IGNORECASE
 )
 
-# Circuit / breaker tags: C-101, CB-01, MCB-1, MCCB-3, ACB-01
+# Circuit / breaker tags: C-101, CB-01, MCB-1, MCCB-3, ACB-01, CK-01
 _CIRCUIT_SEARCH = re.compile(
-    r'\b((?:MCB|RCCB|MCCB|ACB|VCB|CB|C)-\d{1,4}[A-Z]?)\b', re.IGNORECASE
+    r'\b((?:MCB|RCCB|MCCB|ACB|VCB|CB|CK|CIRCUIT|C)-\d{1,4}[A-Z]?)\b', re.IGNORECASE
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Earthing Layout Patterns
+# Earthing Layout Patterns (Comprehensive IEEE 80 / IS 3043 / IEC 62305)
 # ──────────────────────────────────────────────────────────────────────────────
 
-_EARTH_BAR_SEARCH = re.compile(r'\b(EBM?-\d{1,4}[A-Z]?|MEB|EBM?)\b', re.IGNORECASE)
-_EARTH_PIT_SEARCH = re.compile(r'\b(EP-[A-Z0-9]{1,4}|EARTH\s+PIT)\b', re.IGNORECASE)
-_BOND_CONDUCTOR_SEARCH = re.compile(r'\b([BE]C-\d{1,4}[A-Z]?)\b', re.IGNORECASE)
+# Earth Bar / Busbar: EBM-01, EB-01, MEB-1, EEB-01, SEB-01, MAIN EARTH BAR, EARTH BUSBAR
+_EARTH_BAR_SEARCH = re.compile(
+    r'\b('
+    r'(?:EBM|MEB|EEB|SEB|PEB|EGB|MGB|GBB|EB|EBB)[-–]?\d{1,4}[A-Z]?'
+    r'|MAIN\s+EARTH\s+BAR(?:\s*[-–]?\s*\d{1,4}[A-Z]?)?'
+    r'|EARTH\s+(?:BAR|BUSBAR|BUS|STRIP\s+BAR)(?:\s*[-–]?\s*[A-Z0-9]{1,4})?'
+    r'|GROUND\s+(?:BAR|BUSBAR|BUS)(?:\s*[-–]?\s*[A-Z0-9]{1,4})?'
+    r'|EARTHING\s+(?:BAR|BUSBAR|BUS)(?:\s*[-–]?\s*[A-Z0-9]{1,4})?'
+    r')\b',
+    re.IGNORECASE
+)
+
+# Earth Pit / Electrode: EP-01, EP-A, EE-01, EARTH PIT, EARTH CHAMBER, EARTH ELECTRODE, TEST PIT
+_EARTH_PIT_SEARCH = re.compile(
+    r'\b('
+    r'(?:EP|EE|ER|GP|ELP)[-–]?\d{1,4}[A-Z]?'
+    r'|EARTH\s+(?:PIT|CHAMBER|ELECTRODE|WELL|ROD)(?:\s*[-–/]?\s*[A-Z0-9]{1,4})?'
+    r'|GROUND(?:ING)?\s+(?:PIT|CHAMBER|ELECTRODE|WELL)(?:\s*[-–/]?\s*[A-Z0-9]{1,4})?'
+    r'|EARTH\s+TEST\s+PIT'
+    r'|TEST\s+(?:PIT|LINK|CHAMBER)'
+    r'|DISCONNECTING\s+LINK'
+    r')\b',
+    re.IGNORECASE
+)
+
+# Bond Conductor / Earthing Strip: BC-01, EC-01, GC-01, COPPER TAPE, GS FLAT, GI FLAT, 25X3 MM, 50X6 MM, 70 SQMM
+_BOND_CONDUCTOR_SEARCH = re.compile(
+    r'\b('
+    r'(?:BC|EC|EBC|GBC|GC-)[-–]?\d{1,4}[A-Z]?'
+    r'|COPPER\s+(?:TAPE|STRIP|CONDUCTOR|WIRE|CABLE)'
+    r'|CU\s+(?:TAPE|STRIP|CONDUCTOR)'
+    r'|(?:GS|GI|MS)\s+(?:FLAT|STRIP|TAPE)'
+    r'|EARTHING\s+(?:CONDUCTOR|STRIP|TAPE|GRID|MAT|LEAD)'
+    r'|GROUNDING\s+(?:CONDUCTOR|STRIP|TAPE|GRID|MAT|LEAD)'
+    r'|\d{2,3}\s*[xX]\s*\d{1,2}\s*(?:MM|MM2|SQMM)'
+    r'|\d{2,3}\s*(?:SQMM|SQ\.MM|MM2)'
+    r')\b',
+    re.IGNORECASE
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Text normalization & bulk classifier
 # ──────────────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OCR character correction table (Fix 1: pre-correct before regex matching)
+# ──────────────────────────────────────────────────────────────────────────────
+_OCR_CORRECTIONS = [
+    # In letter-only runs: 0 → O, 1 → I
+    (re.compile(r'(?<=[A-Z])0(?=[A-Z])'), 'O'),
+    (re.compile(r'(?<=[A-Z])1(?=[A-Z])'), 'I'),
+    # In digit-only runs: O → 0, l → 1, S → 5 (only when surrounded by digits)
+    (re.compile(r'(?<=\d)[Ol](?=\d)'), '0'),
+    # Pipe size inch mark: 8" → 8", protect known fractions
+    (re.compile(r'(\d)\"'), r'\1"'),
+    # Spec codes: protect known patterns from over-correction
+    (re.compile(r'\bFCllS\b'), 'FC11S'),
+    (re.compile(r'\bFCIIS\b'), 'FC11S'),
+    (re.compile(r'\bGCllS\b'), 'GC11S'),
+    (re.compile(r'\bACZlS\b'), 'AC21S'),
+    (re.compile(r'\bAS2OS\b'), 'AS20S'),
+    # Instrument code corrections: PlT → PIT, TlT → TIT, FlT → FIT
+    (re.compile(r'\bPlT\b'), 'PIT'),
+    (re.compile(r'\bTlT\b'), 'TIT'),
+    (re.compile(r'\bFlT\b'), 'FIT'),
+    (re.compile(r'\bLlT\b'), 'LIT'),
+    (re.compile(r'\bAlT\b'), 'AIT'),
+    (re.compile(r'\bPDl\b'), 'PDI'),
+    (re.compile(r'\bPDlT\b'), 'PDIT'),
+]
+
+
+def _ocr_correct(text: str) -> str:
+    """Apply context-aware OCR character corrections before regex classification."""
+    for pattern, replacement in _OCR_CORRECTIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
 
 def _normalize(text: str) -> str:
     if not text:
@@ -199,6 +350,7 @@ def classify_paddle_results(
             continue
 
         t = _normalize(text)
+        t = _ocr_correct(t)   # Fix 1: pre-correct OCR character misreads
         if not t or len(t) < 2:
             continue
 
@@ -226,9 +378,17 @@ def classify_paddle_results(
             seq = m.group(3)
             if len(seq) == 6:
                 continue  # Drawing reference number, skip
+            # Reject spec codes like GC11S, AS20S embedded in full tag
+            if _SPEC_CODE_PATTERN.match(full_tag) or _SERVICE_CODE_PATTERN.match(full_tag):
+                continue
             if full_tag in found and found[full_tag]['classification'] != 'NOTE':
                 continue
-            if code in _INSTRUMENT_CODES:
+            # ISA 5.1 valve codes with 4+ digit sequence → always VALVE_TAG
+            # (GB, CB, BL, GT are valves when seq >= 4 digits; equipment when seq <= 3)
+            _VALVE_FUNCTION_CODES = {'CB', 'GB', 'BL', 'GT', 'BT', 'GL', 'NV'}
+            if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 4:
+                cat = 'VALVE_TAG'
+            elif code in _INSTRUMENT_CODES:
                 cat = 'INSTRUMENT_TAG'
             elif code in _EQUIPMENT_CODES:
                 cat = 'EQUIPMENT_TAG'
@@ -255,36 +415,51 @@ def classify_paddle_results(
                     found[tag] = _make_item(tag, 'VALVE_TAG', conf, item)
                     item_added = True
 
-        # Generic equipment
+        # Electrical / Earthing / SLD / Lighting patterns (un-gated for 100% sensitivity across all drawing types)
+        for m in _EARTH_BAR_SEARCH.finditer(t):
+            tag = m.group(1).upper()
+            if tag not in found:
+                found[tag] = _make_item(tag, 'EARTH_BAR_TAG', conf, item)
+                item_added = True
+        for m in _EARTH_PIT_SEARCH.finditer(t):
+            tag = m.group(1).upper()
+            if tag not in found:
+                found[tag] = _make_item(tag, 'EARTH_PIT_TAG', conf, item)
+                item_added = True
+        for m in _BOND_CONDUCTOR_SEARCH.finditer(t):
+            tag = m.group(1).upper()
+            if tag not in found:
+                found[tag] = _make_item(tag, 'BOND_CONDUCTOR_TAG', conf, item)
+                item_added = True
+        for m in _PANEL_SEARCH.finditer(t):
+            tag = m.group(1).upper()
+            if tag not in found:
+                found[tag] = _make_item(tag, 'PANEL_TAG', conf, item)
+                item_added = True
+        for m in _CIRCUIT_SEARCH.finditer(t):
+            tag = m.group(1).upper()
+            if tag not in found:
+                found[tag] = _make_item(tag, 'CIRCUIT_TAG', conf, item)
+                item_added = True
+        for m in _LUMINAIRE_SEARCH.finditer(t):
+            tag = m.group(1).upper()
+            if tag not in found:
+                found[tag] = _make_item(tag, 'LUMINAIRE_TAG', conf, item)
+                item_added = True
+
+        # Generic equipment — guarded with prefix allowlist (Fix 4)
         for m in _GENERIC_EQUIP_PATTERN.finditer(t):
             tag = m.group(1).upper()
             if tag not in found:
-                prefix = tag.split('-')[0]
-                if len(prefix) <= 3 and prefix.isalpha():
+                prefix = tag.split('-')[0].upper()
+                # Reject spec codes, service codes (PV-26, VA-26), and drawing refs
+                if _SPEC_CODE_PATTERN.match(tag) or _SERVICE_CODE_PATTERN.match(tag):
+                    continue
+                # Only accept known equipment prefixes; reject spec codes / line refs
+                if (prefix in _EQUIP_PREFIX_ALLOWLIST
+                        and not _EQUIP_REJECT_PATTERN.match(tag)
+                        and len(prefix) <= 3):
                     found[tag] = _make_item(tag, 'EQUIPMENT_TAG', conf, item)
-                    item_added = True
-
-        # Electrical / Earthing / SLD specific patterns
-        if dt in ('ELECTRICAL_LAYOUT', 'EARTHING_LAYOUT', 'SLD', 'CABLE_SCHEDULE'):
-            for m in _PANEL_SEARCH.finditer(t):
-                tag = m.group(1).upper()
-                if tag not in found:
-                    found[tag] = _make_item(tag, 'PANEL_TAG', conf, item)
-                    item_added = True
-            for m in _CIRCUIT_SEARCH.finditer(t):
-                tag = m.group(1).upper()
-                if tag not in found:
-                    found[tag] = _make_item(tag, 'CIRCUIT_TAG', conf, item)
-                    item_added = True
-            for m in _LUMINAIRE_SEARCH.finditer(t):
-                tag = m.group(1).upper()
-                if tag not in found:
-                    found[tag] = _make_item(tag, 'LUMINAIRE_TAG', conf, item)
-                    item_added = True
-            for m in _EARTH_BAR_SEARCH.finditer(t):
-                tag = m.group(1).upper()
-                if tag not in found:
-                    found[tag] = _make_item(tag, 'EARTH_BAR_TAG', conf, item)
                     item_added = True
 
         # Elevation tags

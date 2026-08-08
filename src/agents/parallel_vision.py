@@ -282,8 +282,8 @@ class TextRecognitionAgent(BaseAgent):
             except Exception as pdf_err:
                 logger.warning(f"PyMuPDF vector text extraction failed ({pdf_err}).")
 
-        # Option C: Local PaddleOCR / PaddleOCR-VL baseline
-        if not ocr_items or ocr_engine in ("paddle", "pdf_text", "paddle_vl", "got-ocr", "local"):
+        # Option C: Local PaddleOCR / PaddleOCR-VL baseline (only if vector text layer returned nothing)
+        if not ocr_items:
             try:
                 from src.utils.preprocess import preprocess_for_ocr
                 from src.utils.paddle_ocr import run_paddle_ocr
@@ -596,6 +596,17 @@ class PipelineRecognitionAgent(BaseAgent):
         from src.utils.line_tracer import trace_lines_and_connections
         text_elements = state.get("extracted_entities", {}).get("text_elements", [])
         symbols = state.get("extracted_entities", {}).get("symbols", [])
+
+        # Guarantee non-empty text_elements for line tracer even if running in parallel
+        if not text_elements:
+            try:
+                from src.utils.paddle_ocr import run_paddle_ocr
+                from src.utils.tag_classifier import classify_paddle_results
+                raw_ocr = run_paddle_ocr(raw_image)
+                text_elements = classify_paddle_results(raw_ocr, drawing_type)
+                logger.info(f"PipelineRecognitionAgent fallback OCR loaded {len(text_elements)} text elements.")
+            except Exception as e:
+                logger.warning(f"PipelineRecognitionAgent fallback OCR failed: {e}")
 
         cv_res = trace_lines_and_connections(
             image_path=raw_image,

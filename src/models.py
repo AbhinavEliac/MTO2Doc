@@ -26,6 +26,7 @@ class EquipmentItem(BaseModel):
     flow_rate: Optional[str] = Field(default=None, description="Flow rate (e.g., 62809 kg/h)")
     duty: Optional[str] = Field(default=None, description="Duty rating (e.g., 1835 kW)")
     material: Optional[str] = Field(default=None, description="Material of construction")
+    location: Optional[str] = Field(default=None, description="Physical location or footprint grid reference")
     coordinates: Optional[List[float]] = Field(default=None, description="Bounding box [ymin, xmin, ymax, xmax]")
 
 
@@ -83,7 +84,20 @@ class Relationship(BaseModel):
     source: str = Field(description="Source component tag identifier")
     target: str = Field(description="Target component tag identifier")
     type: str = Field(description="Type of connection (e.g., 'connects_to', 'measures', 'controls', 'mounted_on')")
+    confidence: float = Field(default=1.0, description="Extraction confidence level")
     attributes: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata for the connection")
+
+    @property
+    def source_tag(self) -> str:
+        return self.source
+
+    @property
+    def target_tag(self) -> str:
+        return self.target
+
+    @property
+    def rel_type(self) -> str:
+        return self.type.upper()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

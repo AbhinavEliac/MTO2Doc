@@ -53,10 +53,10 @@ _TITLE_KEYWORDS: List[tuple[re.Pattern, DrawingType]] = [
     # P&ID / PFD
     (re.compile(r'\bP\s*&\s*I\s*D\b|\bPIPING\s+(AND\s+)?INSTRUMENTATION\b', re.IGNORECASE), DrawingType.PID),
     (re.compile(r'\bPROCESS\s+FLOW\s+(DIAGRAM|CHART)\b|\bPFD\b', re.IGNORECASE), DrawingType.PFD),
-    # Electrical
-    (re.compile(r'\bEARTHING\b|\bGROUNDING\b|\bEARTH\s+LAYOUT\b', re.IGNORECASE), DrawingType.EARTHING_LAYOUT),
+    # Electrical & Earthing
+    (re.compile(r'\bEARTHING\b|\bGROUNDING\b|\bEARTH\s+LAYOUT\b|\bEARTH\s+GRID\b|\bBONDING\b', re.IGNORECASE), DrawingType.EARTHING_LAYOUT),
     (re.compile(r'\bSINGLE\s+LINE\s+(DIAGRAM|SCHEMATIC)\b|\bSLD\b|\bONE\s+LINE\b', re.IGNORECASE), DrawingType.SLD),
-    (re.compile(r'\bLIGHTING\s+LAYOUT\b|\bELECTRICAL\s+LAYOUT\b|\bPOWER\s+LAYOUT\b|\bLUMINAIRE\b', re.IGNORECASE), DrawingType.ELECTRICAL_LAYOUT),
+    (re.compile(r'\bLIGHTING\b|\bELECTRICAL\s+LAYOUT\b|\bPOWER\s+LAYOUT\b|\bLUMINAIRE\b|\bLIGHTING\s+LAYOUT\b', re.IGNORECASE), DrawingType.ELECTRICAL_LAYOUT),
     (re.compile(r'\bCABLE\s+(SCHEDULE|TRAY|ROUTING|LAYOUT)\b', re.IGNORECASE), DrawingType.CABLE_SCHEDULE),
     # HVAC
     (re.compile(r'\bHVAC\b|\bVENTILATION\s+LAYOUT\b|\bAIR\s+HANDLING\b|\bDUCT\s+LAYOUT\b', re.IGNORECASE), DrawingType.HVAC_LAYOUT),
