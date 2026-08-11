@@ -42,6 +42,9 @@ outputs/
 rasterized/
 temp/
 tmp/
+runs/
+*.pt
+
 
 # ------------------------------------------------------------------------------
 # 5. Databases, Execution Logs & Runtime Metrics

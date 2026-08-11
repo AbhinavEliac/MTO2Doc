@@ -234,10 +234,7 @@ pid_project/
 
 ---
 
-## 👤 Author & Contact
 
-**Developer**: Abhinav Gupta  
-**Email**: [abhinavgupta15.ag@gmail.com](mailto:abhinavgupta15.ag@gmail.com)  
 
 ---
 

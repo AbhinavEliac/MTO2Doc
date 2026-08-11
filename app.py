@@ -227,21 +227,74 @@ symbol_option = st.sidebar.selectbox(
     options=[
         "Pathnovo ISA 5.1 Instrument & Symbol Engine",
         "ISA-5.1 VLM Symbol Detector (Multimodal VLM)",
+        "🏋️ Trained YOLOv8 Symbol Detector (Local / Offline)",
         "GLM-OCR / RF-DETR Object Pipeline (Local / API)",
         "Heuristic Bounding Box Harvester (Local / Offline)",
     ],
     index=0,
-    help="Select symbol detector. Pathnovo ISA 5.1 & VLMs classify graphical symbols & bounding boxes.",
+    help="Select symbol detector. 'Trained YOLOv8' uses your custom best.pt trained on the P&ID dataset — fastest and offline.",
 )
 symbol_engine_map = {
     "Pathnovo ISA 5.1 Instrument & Symbol Engine": "pathnovo_isa51",
     "ISA-5.1 VLM Symbol Detector (Multimodal VLM)": "vlm",
+    "🏋️ Trained YOLOv8 Symbol Detector (Local / Offline)": "yolo_trained",
     "GLM-OCR / RF-DETR Object Pipeline (Local / API)": "glm_rfdetr",
     "Heuristic Bounding Box Harvester (Local / Offline)": "local",
 }
 symbol_engine = symbol_engine_map.get(symbol_option, "pathnovo_isa51")
 
-st.sidebar.markdown("### ⚡ Pipeline & Connectivity Agent Engine")
+# ── Trained YOLO settings panel (only shown when yolo_trained is selected) ──
+yolo_weights_path = None
+if symbol_engine == "yolo_trained":
+    _default_yolo_path = os.getenv(
+        "DEFAULT_YOLO_WEIGHTS",
+        os.path.join(os.getcwd(), "training", "outputs", "yolo_runs",
+                     "pid_symbol_detector", "weights", "best.pt")
+    )
+    _yolo_weights_exist = os.path.exists(_default_yolo_path)
+
+    with st.sidebar.expander("⚙️ Trained YOLOv8 Settings", expanded=True):
+        if _yolo_weights_exist:
+            st.success(f"✅ Weights found: `.../{'/'.join(_default_yolo_path.replace(os.sep, '/').split('/')[-3:])}`")
+        else:
+            st.warning(
+                "⚠️ No trained weights found at the default path. "
+                "Run `python training/train.py yolo` first, or paste a custom path below."
+            )
+
+        yolo_weights_path = st.text_input(
+            "Weights Path (best.pt)",
+            value=_default_yolo_path,
+            help="Absolute path to your trained YOLOv8 best.pt weights file.",
+            key="yolo_weights_path_input",
+        )
+
+        yolo_conf = st.slider(
+            "Detection Confidence Threshold",
+            min_value=0.10, max_value=0.90, value=0.25, step=0.05,
+            help="Lower → more detections (may include false positives). Higher → fewer but more precise.",
+            key="yolo_conf_slider",
+        )
+
+        yolo_iou = st.slider(
+            "NMS IoU Threshold",
+            min_value=0.30, max_value=0.80, value=0.45, step=0.05,
+            help="Controls how aggressively overlapping boxes are suppressed.",
+            key="yolo_iou_slider",
+        )
+
+        st.caption(
+            "🖥️ Will run on **CUDA GPU (RTX 3050)** if available, otherwise CPU. "
+            "Model class vocab: 26 ISA-5.1 symbol classes."
+        )
+
+# Defaults when yolo_trained is not selected
+if symbol_engine != "yolo_trained":
+    yolo_weights_path = None
+    yolo_conf = 0.25
+    yolo_iou  = 0.45
+
+
 pipeline_option = st.sidebar.selectbox(
     "Pipeline & Line Tracing Engine",
     options=[
@@ -426,7 +479,12 @@ with tab_main_dashboard:
             "use_mocks": use_mocks,
             "local_mode": local_mode or (reasoning_engine == "rule_based" and ocr_engine in ("paddle", "pdf_text")),
             "re_extracted_targets": [],
+            "yolo_weights_path": yolo_weights_path,
+            "yolo_conf": yolo_conf,
+            "yolo_iou": yolo_iou,
+
         }
+
 
         # Start asynchronous background thread
         start_extraction_thread(

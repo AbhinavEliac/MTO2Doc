@@ -33,6 +33,15 @@ from src.utils.mock_data import MOCK_TEXT_ELEMENTS, MOCK_SYMBOLS, MOCK_RELATIONS
 logger = logging.getLogger(__name__)
 
 
+def _is_cuda_available() -> bool:
+    """Returns True if a CUDA GPU is available (e.g. RTX 3050)."""
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Drawing-type-aware prompt builders
 # ──────────────────────────────────────────────────────────────────────────────
@@ -426,8 +435,78 @@ class SymbolRecognitionAgent(BaseAgent):
             except Exception as p_err:
                 logger.warning(f"Pathnovo Symbol Parser failed ({p_err}). Falling back to standard VLM pipeline.")
 
-        # Option B: VLM or GLM-OCR / RF-DETR object detector
+        # Option B: Trained YOLOv8 Symbol Detector (custom best.pt from training pipeline)
+        elif symbol_engine == "yolo_trained":
+            weights_path = (
+                state.get("yolo_weights_path")
+                or os.getenv("DEFAULT_YOLO_WEIGHTS", "")
+            )
+            if not weights_path or not os.path.exists(weights_path):
+                logger.warning(
+                    f"YOLOv8 weights not found at '{weights_path}'. "
+                    "Falling back to heuristic harvester. "
+                    "Run training first: python training/train.py yolo ..."
+                )
+            else:
+                try:
+                    from ultralytics import YOLO
+                    from src.agents.base import BaseAgent as _BA
+
+                    logger.info(f"SymbolRecognitionAgent: Loading trained YOLOv8 from '{weights_path}'...")
+                    yolo_model = YOLO(weights_path)
+
+                    # Encode image for inference
+                    import numpy as np
+                    from PIL import Image as _PilImage
+                    with _PilImage.open(raw_image) as _img:
+                        img_w, img_h = _img.size
+                        _img_rgb = _img.convert("RGB")
+
+                    results = yolo_model.predict(
+                        source=str(raw_image),
+                        conf=state.get("yolo_conf") or 0.25,
+                        iou=state.get("yolo_iou") or 0.45,
+                        imgsz=800,          # Match training imgsz
+                        device="0" if _is_cuda_available() else "cpu",
+                        verbose=False,
+                    )
+
+                    # YOLO class names from the training annotation_generator
+                    from training.annotation_generator import SYMBOL_CLASSES
+
+                    for result in results:
+                        for box in result.boxes:
+                            cls_id   = int(box.cls[0].item())
+                            conf_val = float(box.conf[0].item())
+                            # box.xyxyn → normalized [x1, y1, x2, y2]
+                            x1n, y1n, x2n, y2n = box.xyxyn[0].tolist()
+                            sym_type = SYMBOL_CLASSES[cls_id] if cls_id < len(SYMBOL_CLASSES) else "UNKNOWN"
+
+                            symbols.append({
+                                "symbol_type" : sym_type,
+                                "inferred_tag": None,
+                                "ymin"        : round(y1n, 4),
+                                "xmin"        : round(x1n, 4),
+                                "ymax"        : round(y2n, 4),
+                                "xmax"        : round(x2n, 4),
+                                "confidence"  : round(conf_val, 3),
+                            })
+
+                    logger.info(
+                        f"SymbolRecognitionAgent (yolo_trained): detected {len(symbols)} symbols "
+                        f"from '{os.path.basename(weights_path)}'."
+                    )
+                except ImportError:
+                    logger.error(
+                        "ultralytics not installed. Run: pip install ultralytics. "
+                        "Falling back to heuristic harvester."
+                    )
+                except Exception as yolo_err:
+                    logger.error(f"Trained YOLOv8 inference failed ({yolo_err}). Falling back to heuristic harvester.")
+
+        # Option C: VLM or GLM-OCR / RF-DETR object detector
         elif not (local_mode or symbol_engine == "local"):
+
             prompt = (
                 f"You are an expert industrial vision detector specializing in ISA-5.1 and engineering symbol recognition for {dt_label} drawings.\n"
                 f"Identify all graphical component symbols present in this drawing image.\n\n"

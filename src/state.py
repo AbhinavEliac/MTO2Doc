@@ -66,7 +66,7 @@ class GraphState(TypedDict):
     # Selected Layer 2 Reasoning Engine choice ('rule_based', 'qwen', 'qwen_37', 'gemini', 'openai')
     reasoning_engine: Optional[str]
 
-    # Selected Symbol Recognition Engine choice ('vlm', 'glm_rfdetr', 'local')
+    # Selected Symbol Recognition Engine choice ('vlm', 'glm_rfdetr', 'local', 'yolo_trained')
     symbol_engine: Optional[str]
 
     # Selected Pipeline Recognition Engine choice ('cv_vlm_tracer', 'vlm_tracer', 'proximity_tracer')
@@ -86,3 +86,12 @@ class GraphState(TypedDict):
     
     # List of tags already sent for re-extraction to prevent infinite validation loops
     re_extracted_targets: List[str]
+
+    # Path to custom trained YOLOv8 weights (best.pt) for symbol detection
+    # Set when symbol_engine='yolo_trained'. Falls back to DEFAULT_YOLO_WEIGHTS env var.
+    yolo_weights_path: Optional[str]
+
+    # YOLOv8 inference thresholds (tunable from Streamlit sidebar)
+    yolo_conf: Optional[float]   # confidence threshold (default 0.25)
+    yolo_iou: Optional[float]    # NMS IoU threshold (default 0.45)
+

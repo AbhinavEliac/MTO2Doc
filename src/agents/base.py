@@ -6,7 +6,11 @@ import logging
 from typing import Type, TypeVar, Optional, Union, List, Dict, Any
 from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage
-from src.config import get_gemini_client, get_llm_client
+from src.config import (
+    get_gemini_client, get_llm_client,
+    LLM_MAX_RETRIES, LLM_BASE_DELAY_SECONDS, LLM_MAX_DELAY_SECONDS,
+    LLM_TOKEN_BUDGET_WARN_THRESHOLD, DEFAULT_MAX_TOKENS,
+)
 
 T = TypeVar('T', bound=BaseModel)
 logger = logging.getLogger(__name__)
@@ -95,15 +99,17 @@ class BaseAgent:
         base_url: Optional[str] = None,
         temperature: float = 0.0,
         has_image: bool = False,
+        max_tokens: Optional[int] = None,
     ):
         """
         Helper to select the requested LLM client (Gemini, Qwen, OpenAI, etc.).
         Auto-remaps text-only model names to vision models when images are present.
+        Passes per-agent max_tokens budget to the underlying client factory.
         """
         # Auto-remap text-only model names when vision/image input is required
         if has_image and model_name and "instruct" in model_name.lower() and "-vl" not in model_name.lower():
-            logger.info(f"Auto-mapping text-only model '{model_name}' to vision model 'qwen/qwen-3.7-vl' for multimodal input.")
-            model_name = "qwen/qwen-3.7-vl"
+            logger.info(f"Auto-mapping text-only model '{model_name}' to vision model 'qwen/qwen2.5-vl-72b-instruct' for multimodal input.")
+            model_name = "qwen/qwen2.5-vl-72b-instruct"
 
         if provider and provider.lower() not in ("default", "gemini"):
             return get_llm_client(
@@ -112,10 +118,11 @@ class BaseAgent:
                 api_key=api_key,
                 base_url=base_url,
                 temperature=temperature,
+                max_tokens=max_tokens,
             )
         if self.llm is not None:
             return self.llm
-        return get_gemini_client(temperature=temperature, model_name=model_name)
+        return get_gemini_client(temperature=temperature, model_name=model_name, max_tokens=max_tokens)
 
     def invoke_structured(
         self,
@@ -129,10 +136,12 @@ class BaseAgent:
         model_name: Optional[str] = None,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> T:
         """
         Invokes the target model with a requested Pydantic output schema.
         Supports text-only and multimodal structured extraction across providers.
+        Uses configurable exponential backoff from LLM_MAX_RETRIES / LLM_BASE_DELAY_SECONDS.
         """
         has_img = bool(image_path or image_uri)
         llm_instance = self.get_target_llm(
@@ -141,7 +150,12 @@ class BaseAgent:
             api_key=api_key,
             base_url=base_url,
             has_image=has_img,
+            max_tokens=max_tokens,
         )
+
+        # Log token budget if set
+        if max_tokens:
+            logger.debug(f"invoke_structured: token budget = {max_tokens} tokens.")
         
         structured_llm = llm_instance.with_structured_output(schema)
         
@@ -171,32 +185,37 @@ class BaseAgent:
             messages.append(HumanMessage(content=content))
         else:
             messages.append(HumanMessage(content=prompt))
-            
-        max_attempts = 2 if has_img else 3
-        delay = 1
+
+        # Configurable retry policy with exponential backoff
+        max_attempts = LLM_MAX_RETRIES
+        base_delay   = LLM_BASE_DELAY_SECONDS
+        max_delay    = LLM_MAX_DELAY_SECONDS
+        delay = base_delay
+
         for attempt in range(max_attempts):
             try:
                 response = structured_llm.invoke(messages)
                 return response
             except Exception as e:
                 err_msg = str(e)
-                # Fast failover on fatal client/model errors to avoid wasting minutes
+                # Fast failover on fatal client/model errors
                 if "400" in err_msg or "Invalid" in err_msg or "unsupported" in err_msg or "BadRequest" in err_msg:
                     logger.warning(f"Fatal client/model error ({err_msg[:120]}). Fast failover to local fallback.")
                     raise e
 
                 if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "Quota exceeded" in err_msg:
                     if attempt < max_attempts - 1:
-                        wait_time = delay + random.uniform(0.5, 1.5)
-                        logger.warning(f"Rate limit hit. Waiting {wait_time:.2f} seconds before retry...")
+                        wait_time = min(delay + random.uniform(0.5, 2.0), max_delay)
+                        logger.warning(f"Rate limit hit (attempt {attempt+1}/{max_attempts}). Waiting {wait_time:.1f}s before retry...")
                         time.sleep(wait_time)
-                        delay *= 2
+                        delay = min(delay * 2, max_delay)
                         continue
                     else:
                         raise e
                 else:
                     if attempt < max_attempts - 1:
-                        time.sleep(1)
+                        time.sleep(min(delay, max_delay))
+                        delay = min(delay * 2, max_delay)
                         continue
                     else:
                         raise e
@@ -212,17 +231,22 @@ class BaseAgent:
         model_name: Optional[str] = None,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """
         Standard text-based model invocation (returns raw string).
         Supports multimodal context via image path or file URI across providers.
+        Logs token budget usage warnings when nearing LLM_TOKEN_BUDGET_WARN_THRESHOLD.
         """
         llm_instance = self.get_target_llm(
             provider=provider,
             model_name=model_name,
             api_key=api_key,
             base_url=base_url,
+            max_tokens=max_tokens,
         )
+
+        _budget = max_tokens or DEFAULT_MAX_TOKENS
         
         messages = []
         if system_instruction:
@@ -250,21 +274,33 @@ class BaseAgent:
             messages.append(HumanMessage(content=content))
         else:
             messages.append(HumanMessage(content=prompt))
-            
-        max_attempts = 5
-        delay = 4
+
+        # Configurable retry policy with exponential backoff
+        max_attempts = LLM_MAX_RETRIES
+        base_delay   = LLM_BASE_DELAY_SECONDS
+        max_delay    = LLM_MAX_DELAY_SECONDS
+        delay = base_delay
+
         for attempt in range(max_attempts):
             try:
                 response = llm_instance.invoke(messages)
-                return str(response.content)
+                result = str(response.content)
+                # Token budget warning: rough char-to-token estimate (4 chars ≈ 1 token)
+                approx_tokens = len(result) // 4
+                if approx_tokens > _budget * LLM_TOKEN_BUDGET_WARN_THRESHOLD:
+                    logger.warning(
+                        f"Token budget warning: response ~{approx_tokens} tokens "
+                        f"({approx_tokens/_budget*100:.0f}% of {_budget} budget)."
+                    )
+                return result
             except Exception as e:
                 err_msg = str(e)
                 if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "Quota exceeded" in err_msg:
                     if attempt < max_attempts - 1:
                         jitter = random.uniform(0.5, 2.5)
-                        wait_time = delay + jitter
-                        logger.warning(f"Rate limit 429 hit. Waiting {wait_time:.2f} seconds before retry...")
+                        wait_time = min(delay + jitter, max_delay)
+                        logger.warning(f"Rate limit 429 hit (attempt {attempt+1}/{max_attempts}). Waiting {wait_time:.1f}s before retry...")
                         time.sleep(wait_time)
-                        delay *= 2
+                        delay = min(delay * 2, max_delay)
                         continue
                 raise e
