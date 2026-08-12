@@ -26,8 +26,12 @@ class EquipmentItem(BaseModel):
     flow_rate: Optional[str] = Field(default=None, description="Flow rate (e.g., 62809 kg/h)")
     duty: Optional[str] = Field(default=None, description="Duty rating (e.g., 1835 kW)")
     material: Optional[str] = Field(default=None, description="Material of construction")
+    vendor: Optional[str] = Field(default=None, description="Equipment vendor or manufacturer")
+    quantity: Optional[str] = Field(default=None, description="Quantity and duty (e.g., 1x100%)")
     location: Optional[str] = Field(default=None, description="Physical location or footprint grid reference")
     coordinates: Optional[List[float]] = Field(default=None, description="Bounding box [ymin, xmin, ymax, xmax]")
+    aliases: Optional[List[str]] = Field(default=None, description="Alternative tag forms seen on drawing (e.g. short form without area prefix)")
+    confidence: float = Field(default=1.0, description="Extraction confidence score 0–1")
 
 
 class LineItem(BaseModel):
@@ -51,6 +55,9 @@ class InstrumentItem(BaseModel):
     location: Optional[str] = Field(default="Field", description="Physical location (e.g., Field, UCP, Control Room)")
     loop_id: Optional[str] = Field(default=None, description="Instrument loop identifier number (e.g., 9055)")
     coordinates: Optional[List[float]] = Field(default=None, description="Bounding box [ymin, xmin, ymax, xmax]")
+    aliases: Optional[List[str]] = Field(default=None, description="Alternative tag forms (e.g., bare form without area prefix)")
+    confidence: float = Field(default=1.0, description="Extraction confidence score 0–1")
+    flag_reason: Optional[str] = Field(default=None, description="Reason for low confidence or flagging (e.g., ambiguous_setpoint_vs_tag)")
 
 
 class ValveItem(BaseModel):
@@ -62,6 +69,9 @@ class ValveItem(BaseModel):
     rating: Optional[str] = Field(default=None, description="Pressure rating class (e.g., 150#, 300#, 2500#)")
     normal_state: Optional[str] = Field(default=None, description="Normal operation state (e.g., CSO, LO, N)")
     coordinates: Optional[List[float]] = Field(default=None, description="Bounding box [ymin, xmin, ymax, xmax]")
+    aliases: Optional[List[str]] = Field(default=None, description="Alternative tag forms seen on drawing")
+    type_source: str = Field(default="inferred_from_prefix", description="How valve type was determined: inferred_from_prefix | legend_verified")
+    confidence: float = Field(default=1.0, description="Extraction confidence score 0–1")
 
 
 class SafetyReliefValveItem(BaseModel):
@@ -86,6 +96,7 @@ class Relationship(BaseModel):
     type: str = Field(description="Type of connection (e.g., 'connects_to', 'measures', 'controls', 'mounted_on')")
     confidence: float = Field(default=1.0, description="Extraction confidence level")
     attributes: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata for the connection")
+    flag_reason: Optional[str] = Field(default=None, description="Reason for flagging (e.g., cross_document_contamination, low_confidence)")
 
     @property
     def source_tag(self) -> str:

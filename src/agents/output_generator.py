@@ -66,7 +66,7 @@ class OutputGeneratorAgent(BaseAgent):
                     client = genai.Client(api_key=GEMINI_API_KEY)
                     client.files.delete(name=file_name)
                     logger.info("Cloud file deletion completed successfully.")
-            except Exception as e:
+            except (ImportError, Exception) as e:
                 logger.warning(f"Could not delete uploaded file '{file_name}' from Google GenAI Files API: {e}")
         
         return {
@@ -166,23 +166,28 @@ class OutputGeneratorAgent(BaseAgent):
 
             # Instrument List
             if graph.instruments:
-                headers = ["#", "Instrument Tag", "Type", "Loop ID", "Location", "Service"]
+                headers = ["#", "Instrument Tag", "Type", "Loop ID", "Location", "Service", "Aliases", "Confidence"]
                 rows = [{
                     "#": i + 1,
                     "Instrument Tag": inst.tag, "Type": inst.type,
                     "Loop ID": inst.loop_id or "-", "Location": inst.location or "Field",
                     "Service": inst.service or "-",
+                    "Aliases": ", ".join(inst.aliases) if getattr(inst, 'aliases', None) else "-",
+                    "Confidence": f"{int(getattr(inst, 'confidence', 1.0) * 100)}%",
                 } for i, inst in enumerate(graph.instruments)]
                 write_sheet("Instrument List", f"INSTRUMENT LIST — {dt_label}", f"Extracted by SID-AI | {len(rows)} instruments detected", headers, rows)
 
             # Valve List
             if graph.valves:
-                headers = ["#", "Valve Tag", "Type", "Size", "Rating", "Normal State", "Associated Line"]
+                headers = ["#", "Valve Tag", "Type", "Size", "Rating", "Normal State", "Associated Line", "Type Source", "Aliases", "Confidence"]
                 rows = [{
                     "#": i + 1,
                     "Valve Tag": v.tag, "Type": v.type, "Size": v.size or "-",
                     "Rating": v.rating or "-", "Normal State": v.normal_state or "-",
                     "Associated Line": v.line_tag or "-",
+                    "Type Source": getattr(v, 'type_source', 'inferred_from_prefix'),
+                    "Aliases": ", ".join(v.aliases) if getattr(v, 'aliases', None) else "-",
+                    "Confidence": f"{int(getattr(v, 'confidence', 1.0) * 100)}%",
                 } for i, v in enumerate(graph.valves)]
                 write_sheet("Valve List", f"MANUAL VALVE LIST — {dt_label}", f"Extracted by SID-AI | {len(rows)} valves detected", headers, rows)
 
@@ -200,12 +205,15 @@ class OutputGeneratorAgent(BaseAgent):
 
             # Equipment List
             if graph.equipment:
-                headers = ["#", "Equipment Tag", "Type", "Description", "Design Pressure", "Design Temp", "Flow Rate", "Duty", "Material"]
+                headers = ["#", "Equipment Tag", "Type", "Description", "Design Pressure", "Design Temp", "Flow Rate", "Duty", "Material", "Vendor", "Quantity", "Aliases", "Confidence"]
                 rows = [{
                     "#": i + 1,
                     "Equipment Tag": e.tag, "Type": e.type, "Description": e.description or e.name,
                     "Design Pressure": e.design_pressure or "-", "Design Temp": e.design_temperature or "-",
                     "Flow Rate": e.flow_rate or "-", "Duty": e.duty or "-", "Material": e.material or "-",
+                    "Vendor": getattr(e, 'vendor', None) or "-", "Quantity": getattr(e, 'quantity', None) or "-",
+                    "Aliases": ", ".join(e.aliases) if getattr(e, 'aliases', None) else "-",
+                    "Confidence": f"{int(getattr(e, 'confidence', 1.0) * 100)}%",
                 } for i, e in enumerate(graph.equipment)]
                 write_sheet("Equipment List", f"EQUIPMENT LIST — {dt_label}", f"Extracted by SID-AI | {len(rows)} equipment items detected", headers, rows)
 
@@ -321,6 +329,47 @@ class OutputGeneratorAgent(BaseAgent):
                 "Position Y": round(a.position_y, 3) if a.position_y is not None else "-",
             } for i, a in enumerate(graph.annotations)]
             write_sheet("Annotations", "ANNOTATIONS & NOTES", f"Extracted by SID-AI | {len(rows)} annotations", headers, rows)
+
+        # ── Flagged Items Sheet (Human Review Queue) ──────────────────────────
+        flagged_rows = []
+        # Check instruments
+        for inst in graph.instruments:
+            if getattr(inst, 'flag_reason', None):
+                flagged_rows.append({
+                    "Category": "Instrument", "Tag": inst.tag,
+                    "Confidence": f"{int(getattr(inst, 'confidence', 1.0) * 100)}%",
+                    "Flag Reason": inst.flag_reason, "Details": f"Type: {inst.type}, Location: {inst.location}"
+                })
+        # Check valves
+        for v in graph.valves:
+            if getattr(v, 'flag_reason', None):
+                flagged_rows.append({
+                    "Category": "Valve", "Tag": v.tag,
+                    "Confidence": f"{int(getattr(v, 'confidence', 1.0) * 100)}%",
+                    "Flag Reason": v.flag_reason, "Details": f"Type: {v.type}, Source: {getattr(v, 'type_source', 'inferred')}"
+                })
+        # Check lines
+        for l in graph.lines:
+            if getattr(l, 'flag_reason', None):
+                flagged_rows.append({
+                    "Category": "Line Tag", "Tag": l.tag,
+                    "Confidence": f"{int(getattr(l, 'confidence', 1.0) * 100)}%",
+                    "Flag Reason": l.flag_reason, "Details": f"Size: {l.size}, Spec: {l.spec}"
+                })
+        # Check relationships
+        for r in graph.relationships:
+            if getattr(r, 'flag_reason', None):
+                flagged_rows.append({
+                    "Category": "Relationship",
+                    "Tag": f"{getattr(r, 'source_tag', getattr(r, 'source', ''))} -> {getattr(r, 'target_tag', getattr(r, 'target', ''))}",
+                    "Confidence": f"{int(getattr(r, 'confidence', 1.0) * 100)}%",
+                    "Flag Reason": r.flag_reason, "Details": f"Rel Type: {getattr(r, 'rel_type', getattr(r, 'type', ''))}"
+                })
+
+        if flagged_rows:
+            headers = ["#", "Category", "Tag", "Confidence", "Flag Reason", "Details"]
+            rows = [{"#": i + 1, **row} for i, row in enumerate(flagged_rows)]
+            write_sheet("Flagged Items", "HUMAN REVIEW QUEUE — FLAGGED ITEMS", f"Flagged by SID-AI | {len(rows)} items require review", headers, rows)
 
         if not wb.sheetnames:
             ws = wb.create_sheet("No Data")

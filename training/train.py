@@ -92,6 +92,7 @@ def cmd_yolo(args):
     logger.info(f"  Epochs      : {args.epochs}")
     logger.info(f"  Batch size  : {args.batch}")
     logger.info(f"  Model       : {args.model}")
+    logger.info(f"  Fresh run   : {args.fresh}")
     
     from training.yolo_train_launcher import launch_yolo_training
     best_weights = launch_yolo_training(
@@ -99,6 +100,7 @@ def cmd_yolo(args):
         epochs=args.epochs,
         batch=args.batch,
         model=args.model,
+        fresh=args.fresh,
     )
     logger.info(f"\n✅ Training complete. Best weights: {best_weights}")
     logger.info(f"   → To use in SID-AI: set YOLO_WEIGHTS_PATH={best_weights}")
@@ -193,6 +195,10 @@ def main():
         "--model", default="yolov8m.pt",
         choices=["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt"],
         help="YOLOv8 model variant (default: yolov8m — best for 4GB VRAM)"
+    )
+    p_yolo.add_argument(
+        "--fresh", action="store_true",
+        help="Start training fresh from epoch 1, archiving any previous training run"
     )
     p_yolo.set_defaults(func=cmd_yolo)
 

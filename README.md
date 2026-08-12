@@ -5,9 +5,16 @@
   <img src="https://img.shields.io/badge/LangGraph-Parallel%20Perception-orange?style=for-the-badge&logo=langchain&logoColor=white" alt="LangGraph" />
   <img src="https://img.shields.io/badge/Streamlit-Interactive%20Dashboard-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white" alt="Streamlit" />
   <img src="https://img.shields.io/badge/ISA--5.1-Native%20Extraction-008080?style=for-the-badge" alt="Pathnovo ISA 5.1" />
-  <img src="https://img.shields.io/badge/OpenRouter-Qwen%203.7%20VL-purple?style=for-the-badge&logo=openai&logoColor=white" alt="Qwen 3.7 VL" />
-  <img src="https://img.shields.io/badge/Google-Gemini%202.0%20Flash-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="Gemini" />
+  <img src="https://img.shields.io/badge/Author-Abhinav%20Gupta-green?style=for-the-badge" alt="Author" />
 </p>
+
+---
+
+## 👤 Author & Contact
+
+- **Author**: Abhinav Gupta
+- **Email**: [abhinavgupta15.ag@gmail.com](mailto:abhinavgupta15.ag@gmail.com)
+- **Repository**: [https://github.com/AbhinavEliac/MTO2Doc](https://github.com/AbhinavEliac/MTO2Doc)
 
 ---
 
@@ -229,6 +236,16 @@ pid_project/
 - 📊 **Excel Workbook (`.xlsx`)**: Structured multi-tab spreadsheet featuring Component Tags, Line Schedules, Loop Summaries, and Delta Revision Highlighting.
 - 📐 **AVEVA Diagrams XML (`.xml`)**: Schema-compliant XML tree ready for import into AVEVA Diagrams and Smart 3D (SP3D).
 - 🔧 **Siemens COMOS JSON (`.json`)**: Hierarchical structure (`Project -> Unit -> Location -> Object`) for Siemens COMOS platform.
+- 🗃️ **SmartPlant P&ID CSV (`.csv`)**: Relational database import format for Intergraph SmartPlant.
+- 🕸️ **Master Knowledge Graph (`.json`)**: Full topological node-edge graph representation of the engineering blueprint.
+
+---
+
+<p align="center">
+  <i>Developed by <b>Abhinav Gupta</b> (abhinavgupta15.ag@gmail.com)</i><br>
+  <i>Built with ❤️ using Python, LangGraph, Streamlit, Pathnovo ISA 5.1 API, OpenRouter Qwen 3.7 VL, and Google Gemini.</i>
+</p>
+-> Object`) for Siemens COMOS platform.
 - 🗃️ **SmartPlant P&ID CSV (`.csv`)**: Relational database import format for Intergraph SmartPlant.
 - 🕸️ **Master Knowledge Graph (`.json`)**: Full topological node-edge graph representation of the engineering blueprint.
 

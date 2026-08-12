@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, TypedDict, Optional, Annotated
+from typing import List, Dict, Any, TypedDict, Optional, Annotated, Set
 from src.models import UniversalEngineeringGraph
 
 def merge_entities(left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -94,4 +94,8 @@ class GraphState(TypedDict):
     # YOLOv8 inference thresholds (tunable from Streamlit sidebar)
     yolo_conf: Optional[float]   # confidence threshold (default 0.25)
     yolo_iou: Optional[float]    # NMS IoU threshold (default 0.45)
+
+    # Defect 1 Fix: OCR token set built from primary PDF \u2014 used by provenance filter
+    # in CompilerAgent to drop cross-document contaminated relationship edges.
+    ocr_token_set: Optional[Set[str]]
 

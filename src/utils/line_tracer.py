@@ -63,12 +63,14 @@ def trace_lines_and_connections(
                 if lines is not None:
                     logger.info(f"line_tracer: Hough Transform detected {len(lines)} raw line segments.")
                     for line in lines[:100]:
-                        x1, y1, x2, y2 = line[0]
-                        ny1 = round(y1 / max(img_h, 1), 4)
-                        nx1 = round(x1 / max(img_w, 1), 4)
-                        ny2 = round(y2 / max(img_h, 1), 4)
-                        nx2 = round(x2 / max(img_w, 1), 4)
-                        hough_polylines.append([[ny1, nx1], [ny2, nx2]])
+                        pts = line.reshape(-1)
+                        if len(pts) >= 4:
+                            x1, y1, x2, y2 = pts[:4]
+                            ny1 = round(float(y1) / max(img_h, 1), 4)
+                            nx1 = round(float(x1) / max(img_w, 1), 4)
+                            ny2 = round(float(y2) / max(img_h, 1), 4)
+                            nx2 = round(float(x2) / max(img_w, 1), 4)
+                            hough_polylines.append([[ny1, nx1], [ny2, nx2]])
 
         except Exception as cv_err:
             logger.warning(f"line_tracer: OpenCV line extraction failed ({cv_err}). Using spatial fallbacks.")

@@ -144,16 +144,27 @@ def _get_easyocr():
 
 
 def _run_easyocr(image_path: str, img_w: int, img_h: int) -> List[Dict[str, Any]]:
-    """Run EasyOCR and normalize output to standard item format."""
+    """Run EasyOCR on loaded image numpy array and normalize output."""
     reader = _get_easyocr()
-    # EasyOCR returns: list of (bbox, text, confidence)
-    # bbox = [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
-    raw = reader.readtext(image_path, detail=1, paragraph=False,
+    import cv2
+    img_cv = cv2.imread(image_path)
+    if img_cv is None:
+        return []
+
+    raw = reader.readtext(img_cv, detail=1, paragraph=False,
                           min_size=5, text_threshold=0.4, low_text=0.25,
                           decoder='greedy', workers=0)
     items = []
-    for (bbox, text, conf) in raw:
-        if not text.strip() or conf < 0.15:
+    for res in raw:
+        if len(res) == 3:
+            bbox, text, conf = res
+        elif len(res) == 2:
+            bbox, text = res
+            conf = 0.90
+        else:
+            continue
+
+        if not text.strip() or float(conf) < 0.15:
             continue
         xs = [pt[0] for pt in bbox]
         ys = [pt[1] for pt in bbox]
@@ -306,9 +317,19 @@ def run_paddle_ocr(image_path: str) -> List[Dict[str, Any]]:
 
     Returns list of dicts with: text, confidence, bbox, center_x, center_y.
     """
-    if not os.path.exists(image_path):
-        logger.error(f"Image not found: '{image_path}'")
-        return []
+    # ── Check for original PDF vector text first ──────────────────────────────
+    try:
+        parent_dir = os.path.dirname(os.path.dirname(image_path))
+        if os.path.exists(parent_dir):
+            pdf_candidates = [f for f in os.listdir(parent_dir) if f.lower().endswith(".pdf")]
+            if pdf_candidates:
+                pdf_path = os.path.join(parent_dir, pdf_candidates[0])
+                pdf_items = run_pdf_text_extraction(pdf_path)
+                if len(pdf_items) > 20:
+                    logger.info(f"run_paddle_ocr: PyMuPDF vector text layer extracted {len(pdf_items)} items from '{pdf_candidates[0]}'.")
+                    return pdf_items
+    except Exception as pdf_chk_err:
+        logger.warning(f"PyMuPDF vector text check warning: {pdf_chk_err}")
 
     # Get image dimensions for normalization
     img_w, img_h = 1, 1

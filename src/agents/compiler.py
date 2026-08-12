@@ -93,6 +93,22 @@ class CompilerAgent(BaseAgent):
                 existing_rel_keys.add(key)
                 all_relations.append(cr)
 
+        # ── Defect 1 Fix: Provenance filter — drop cross-document contamination ──
+        ocr_token_set = state.get("ocr_token_set", set())
+        if ocr_token_set:
+            from src.utils.provenance import filter_relationships_by_provenance
+            all_relations, dropped = filter_relationships_by_provenance(
+                all_relations, ocr_token_set
+            )
+            if dropped:
+                examples = [f"{d.get('source_tag')}->{d.get('target_tag')}" for d in dropped[:3]]
+                logger.warning(
+                    f"Provenance: dropped {len(dropped)} cross-document relationship(s). "
+                    f"Examples: {examples}"
+                )
+        else:
+            logger.info("Provenance: no OCR token set in state; skipping contamination filter.")
+
         # Always compile relationships (cross-type)
         graph.relationships = self._compile_relationships(all_relations)
 
@@ -153,14 +169,10 @@ class CompilerAgent(BaseAgent):
             tag = eq["tag"]
 
             # Deduplicate by canonical key (strip project prefix AND trailing unit suffix)
-            # e.g.: 26-HA-911-C01 → HA-911,  26-KA-901-A → KA-901,  KA-901 → KA-901
-            canon_key = re.sub(r'^\d{2,3}-', '', tag.upper())  # strip project prefix
-            # Strip trailing unit designator only if it contains at least one alpha char
-            # This prevents stripping the last digit of a sequence number (HA-911 → HA-91)
-            canon_key = re.sub(r'-[A-Z][A-Z0-9]{0,3}$', '', canon_key)  # -C01, -A, -B only
+            canon_key = re.sub(r'^\d{2,3}-', '', tag.upper())
+            canon_key = re.sub(r'-[A-Z][A-Z0-9]{0,3}$', '', canon_key)
 
             if canon_key in seen_equip:
-                # Prefer longer project-prefixed tag
                 if len(tag) > len(seen_equip[canon_key].tag):
                     seen_equip[canon_key].tag = tag
                 continue
@@ -171,7 +183,6 @@ class CompilerAgent(BaseAgent):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            # Derive equipment type from ISA lookup
             code_match = re.search(r'([A-Z]{1,3})(?=-?\d)', tag, re.IGNORECASE)
             eq_code = code_match.group(1).upper() if code_match else ""
             eq_type = self._ISA_EQUIP_DESC.get(eq_code, "Generic Equipment")
@@ -180,18 +191,27 @@ class CompilerAgent(BaseAgent):
                     eq_type = sym["symbol_type"]
                     break
 
+            # ── Defect 5 Fix: populate datasheet fields from injected attributes ──
             attrs = eq.get("attributes") or {}
+            aliases = eq.get("aliases") or []
+            confidence = float(eq.get("confidence", 1.0))
+
             item_obj = EquipmentItem(
                 tag=tag,
                 name=eq["value"],
-                type=eq_type,
-                description=eq["value"],
+                type=attrs.get("type") or eq_type,
+                description=attrs.get("service") or eq["value"],
                 design_pressure=attrs.get("design_pressure"),
                 design_temperature=attrs.get("design_temperature"),
                 flow_rate=attrs.get("flow_rate"),
                 duty=attrs.get("duty") or eq.get("rating"),
                 material=attrs.get("material"),
+                vendor=attrs.get("vendor"),
+                quantity=attrs.get("quantity"),
+                location=attrs.get("location"),
                 coordinates=coords,
+                aliases=aliases if aliases else None,
+                confidence=confidence,
             )
             compiled.append(item_obj)
             seen_equip[canon_key] = item_obj
@@ -416,11 +436,30 @@ class CompilerAgent(BaseAgent):
         relations: List[Dict], lines: List[LineItem]
     ) -> List[ValveItem]:
         compiled = []
+        seen_canonical: dict = {}  # ── Defect 2 Fix: deduplicate by canonical key
         valve_tags = [t for t in texts if t["classification"] == "VALVE_TAG"]
 
         for v in valve_tags:
             tag = v["tag"]
             tag_upper = tag.upper()
+
+            # Deduplicate — prefer the longer (project-prefixed) form
+            canon_key = re.sub(r'^\d{2,3}-?', '', tag_upper)
+            if canon_key in seen_canonical:
+                existing_tag = seen_canonical[canon_key].tag
+                if len(tag) > len(existing_tag):
+                    seen_canonical[canon_key].tag = tag
+                    # Merge alias
+                    als = seen_canonical[canon_key].aliases or []
+                    if existing_tag not in als:
+                        als.append(existing_tag)
+                    seen_canonical[canon_key].aliases = als
+                else:
+                    als = seen_canonical[canon_key].aliases or []
+                    if tag not in als:
+                        als.append(tag)
+                    seen_canonical[canon_key].aliases = als
+                continue  # skip duplicate
 
             v_type = "Valve"
             if "GB" in tag_upper or "GATE" in tag_upper:
@@ -440,7 +479,6 @@ class CompilerAgent(BaseAgent):
             elif tag_upper.startswith(('MOV', 'SDV', 'BDV', 'EV')):
                 v_type = "On-Off Valve"
 
-            # Case-insensitive relation check for host line
             associated_line = None
             for rel in relations:
                 rtype = rel.get("rel_type", "").upper()
@@ -453,21 +491,15 @@ class CompilerAgent(BaseAgent):
                     associated_line = stag
                     break
 
-            # Derive size from the associated line
             derived_size = None
             if associated_line:
                 for line in lines:
                     if line.tag == associated_line:
                         derived_size = line.size
                         break
-            if not derived_size:
-                derived_size = None  # Unknown — don't fabricate
 
-            # Rating from attrs
             attrs = v.get("attributes") or {}
             rating = v.get("rating") or attrs.get("rating") or attrs.get("pressure_class")
-
-            # Normal state from attrs
             normal_state = attrs.get("normal_state")
 
             coords = None
@@ -476,7 +508,7 @@ class CompilerAgent(BaseAgent):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            compiled.append(ValveItem(
+            item_obj = ValveItem(
                 tag=tag,
                 type=v_type,
                 size=derived_size,
@@ -484,7 +516,13 @@ class CompilerAgent(BaseAgent):
                 rating=rating,
                 normal_state=normal_state,
                 coordinates=coords,
-            ))
+                type_source="inferred_from_prefix",  # ── Defect 6 Fix
+                confidence=float(v.get("confidence", 1.0)),
+                aliases=v.get("aliases") or None,
+            )
+            compiled.append(item_obj)
+            seen_canonical[canon_key] = item_obj
+
         return compiled
 
     def _compile_safety_relief_valves(self, texts: List[Dict], symbols: List[Dict]) -> List[SafetyReliefValveItem]:
@@ -495,7 +533,6 @@ class CompilerAgent(BaseAgent):
             tag = psv["tag"]
             attrs = psv.get("attributes") or {}
 
-            # Infer unit prefix from tag (e.g. "26" from "26-PSV-9066A")
             unit_match = re.match(r'^(\d{2})-', tag)
             unit = unit_match.group(1) if unit_match else ""
 
@@ -505,12 +542,19 @@ class CompilerAgent(BaseAgent):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
+            # ── Defect 5 Fix: use parsed set_pressure from datasheet_parser (injected into attrs)
+            set_pressure = (
+                attrs.get("set_pressure")
+                or psv.get("rating")
+                or "N/A"
+            )
+
             compiled.append(SafetyReliefValveItem(
                 tag=tag,
                 type=attrs.get("valve_type", "PSV"),
                 service=psv["value"],
                 unit=unit,
-                set_pressure=psv.get("rating") or attrs.get("set_pressure", "N/A"),
+                set_pressure=set_pressure,
                 inlet_size=attrs.get("inlet_size", "N/A"),
                 outlet_size=attrs.get("outlet_size", "N/A"),
                 inlet_spec=attrs.get("inlet_spec", "N/A"),
@@ -756,12 +800,33 @@ class CompilerAgent(BaseAgent):
         return compiled
 
     def _compile_relationships(self, relations: List[Dict]) -> List[Relationship]:
-        return [
-            Relationship(
-                source=r["source_tag"],
-                target=r["target_tag"],
-                type=r["rel_type"].lower(),
-                attributes={},
-            )
-            for r in relations
-        ]
+        """Compile relationships with deduplication by canonical source/target/type triple."""
+        from src.utils.tag_classifier import canonicalize_tag
+        seen_edges: set = set()
+        result: List[Relationship] = []
+
+        for r in relations:
+            src = r.get("source_tag") or r.get("source") or ""
+            tgt = r.get("target_tag") or r.get("target") or ""
+            rtype = (r.get("rel_type") or r.get("type") or "").lower()
+            flag = r.get("flag_reason")
+
+            if not src or not tgt:
+                continue
+
+            # ── Defect 2 Fix: deduplicate edges by canonical source+target+type ──
+            canon_edge = (canonicalize_tag(src), canonicalize_tag(tgt), rtype)
+            if canon_edge in seen_edges:
+                continue
+            seen_edges.add(canon_edge)
+
+            result.append(Relationship(
+                source=src,
+                target=tgt,
+                type=rtype,
+                confidence=float(r.get("confidence", 1.0)),
+                attributes=r.get("attributes") or {},
+                flag_reason=flag,
+            ))
+
+        return result

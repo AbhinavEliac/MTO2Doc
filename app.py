@@ -30,6 +30,20 @@ from src.thread_manager import (
 
 logger = logging.getLogger(__name__)
 
+# ─── Environment Sanity Check ─────────────────────────────────────────────────
+# Detect if running under system Python (missing pid_env packages).
+# If cv2 / fitz / ultralytics are absent, every agent silently returns 0 results.
+def _check_env() -> list:
+    missing = []
+    for pkg, mod in [("opencv-python (cv2)", "cv2"), ("PyMuPDF (fitz)", "fitz"), ("ultralytics (YOLO)", "ultralytics")]:
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
+    return missing
+
+_MISSING_PKGS = _check_env()
+
 def format_duration(seconds: Optional[float]) -> str:
     if seconds is None or seconds <= 0:
         return "N/A"
@@ -144,6 +158,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ─── Environment Warning Banner ───────────────────────────────────────────────
+if _MISSING_PKGS:
+    st.error(
+        f"⛔ **Wrong Python Environment Detected!**\n\n"
+        f"Critical packages are missing: **{', '.join(_MISSING_PKGS)}**\n\n"
+        f"You are running Streamlit from **system Python** (not the `pid_env` virtual environment). "
+        f"Every extraction will complete in <1 second with **0 results** because OCR, YOLO, and CV imports silently fail.\n\n"
+        f"**Fix: Stop this Streamlit instance and run:**\n"
+        f"```\n.\\pid_env\\Scripts\\python.exe -m streamlit run app.py\n```"
+    )
+    st.stop()
+
 # Fetch all saved threads from SQLite
 all_threads = get_all_threads()
 
@@ -175,8 +201,8 @@ st.sidebar.markdown("### 🔤 Layer 1: OCR Reading Layer")
 ocr_option = st.sidebar.selectbox(
     "1st Layer: OCR Text Engine",
     options=[
-        "PaddleOCR (Local / Offline)",
         "PyMuPDF Vector Text (Local / Offline)",
+        "PaddleOCR (Local / Offline)",
         "Pathnovo ISA 5.1 Extraction Engine (High Accuracy)",
         "PaddleOCR-VL (0.9B Layout Model)",
         "LlamaParse / Vision Layout Agent",
@@ -185,11 +211,11 @@ ocr_option = st.sidebar.selectbox(
         "Qwen 3.7-VL / OpenRouter (Online)",
     ],
     index=0,
-    help="Select the 1st layer OCR engine. Pathnovo ISA 5.1 engine extracts instrument loop data & line specs.",
+    help="Select the 1st layer OCR engine. PyMuPDF extracts 100% accurate vector text layer instantly.",
 )
 ocr_engine_map = {
-    "PaddleOCR (Local / Offline)": "paddle",
     "PyMuPDF Vector Text (Local / Offline)": "pdf_text",
+    "PaddleOCR (Local / Offline)": "paddle",
     "Pathnovo ISA 5.1 Extraction Engine (High Accuracy)": "pathnovo_api",
     "PaddleOCR-VL (0.9B Layout Model)": "paddle_vl",
     "LlamaParse / Vision Layout Agent": "llamaparse",
@@ -197,7 +223,7 @@ ocr_engine_map = {
     "Qwen 2.5-VL / Vision API (Online)": "qwen_ocr",
     "Qwen 3.7-VL / OpenRouter (Online)": "qwen_37_ocr",
 }
-ocr_engine = ocr_engine_map.get(ocr_option, "paddle")
+ocr_engine = ocr_engine_map.get(ocr_option, "pdf_text")
 
 st.sidebar.markdown("### 🧠 Layer 2: Reasoning & Refinement Engine")
 reasoning_option = st.sidebar.selectbox(
@@ -209,8 +235,8 @@ reasoning_option = st.sidebar.selectbox(
         "Gemini 2.0 Flash Engine (Online / API)",
         "OpenAI GPT-4o Engine (Online / API)",
     ],
-    index=1,
-    help="Select the 2nd layer reasoning engine. Online engines fix OCR typos, find missing tags, map misplaced data, and generate clean JSON.",
+    index=0,
+    help="Select the 2nd layer reasoning engine. Rule-Based Classifier runs 100% offline with zero API cost.",
 )
 reasoning_engine_map = {
     "Rule-Based Regex Classifier (Local / Offline)": "rule_based",
@@ -219,40 +245,40 @@ reasoning_engine_map = {
     "Gemini 2.0 Flash Engine (Online / API)": "gemini",
     "OpenAI GPT-4o Engine (Online / API)": "openai",
 }
-reasoning_engine = reasoning_engine_map.get(reasoning_option, "qwen")
+reasoning_engine = reasoning_engine_map.get(reasoning_option, "rule_based")
 
 st.sidebar.markdown("### 🎯 Symbol Recognition Agent Engine")
 symbol_option = st.sidebar.selectbox(
     "Symbol Detection Engine",
     options=[
+        "🏋️ Trained YOLOv8 Symbol Detector (Local / Offline)",
         "Pathnovo ISA 5.1 Instrument & Symbol Engine",
         "ISA-5.1 VLM Symbol Detector (Multimodal VLM)",
-        "🏋️ Trained YOLOv8 Symbol Detector (Local / Offline)",
         "GLM-OCR / RF-DETR Object Pipeline (Local / API)",
         "Heuristic Bounding Box Harvester (Local / Offline)",
     ],
     index=0,
-    help="Select symbol detector. 'Trained YOLOv8' uses your custom best.pt trained on the P&ID dataset — fastest and offline.",
+    help="Select symbol detector. 'Trained YOLOv8' uses your custom best.pt trained on the P&ID dataset on CUDA GPU.",
 )
 symbol_engine_map = {
+    "🏋️ Trained YOLOv8 Symbol Detector (Local / Offline)": "yolo_trained",
     "Pathnovo ISA 5.1 Instrument & Symbol Engine": "pathnovo_isa51",
     "ISA-5.1 VLM Symbol Detector (Multimodal VLM)": "vlm",
-    "🏋️ Trained YOLOv8 Symbol Detector (Local / Offline)": "yolo_trained",
     "GLM-OCR / RF-DETR Object Pipeline (Local / API)": "glm_rfdetr",
     "Heuristic Bounding Box Harvester (Local / Offline)": "local",
 }
-symbol_engine = symbol_engine_map.get(symbol_option, "pathnovo_isa51")
+symbol_engine = symbol_engine_map.get(symbol_option, "yolo_trained")
 
 # ── Trained YOLO settings panel (only shown when yolo_trained is selected) ──
 yolo_weights_path = None
-if symbol_engine == "yolo_trained":
-    _default_yolo_path = os.getenv(
-        "DEFAULT_YOLO_WEIGHTS",
-        os.path.join(os.getcwd(), "training", "outputs", "yolo_runs",
-                     "pid_symbol_detector", "weights", "best.pt")
-    )
-    _yolo_weights_exist = os.path.exists(_default_yolo_path)
+_default_yolo_path = os.getenv(
+    "DEFAULT_YOLO_WEIGHTS",
+    os.path.join(os.getcwd(), "training", "outputs", "yolo_runs",
+                 "pid_symbol_detector", "weights", "best.pt")
+)
+_yolo_weights_exist = os.path.exists(_default_yolo_path)
 
+if symbol_engine == "yolo_trained":
     with st.sidebar.expander("⚙️ Trained YOLOv8 Settings", expanded=True):
         if _yolo_weights_exist:
             st.success(f"✅ Weights found: `.../{'/'.join(_default_yolo_path.replace(os.sep, '/').split('/')[-3:])}`")
@@ -271,8 +297,8 @@ if symbol_engine == "yolo_trained":
 
         yolo_conf = st.slider(
             "Detection Confidence Threshold",
-            min_value=0.10, max_value=0.90, value=0.25, step=0.05,
-            help="Lower → more detections (may include false positives). Higher → fewer but more precise.",
+            min_value=0.10, max_value=0.90, value=0.15, step=0.05,
+            help="Lower → more detections (recommended 0.15 for tiled P&ID inference).",
             key="yolo_conf_slider",
         )
 
@@ -290,29 +316,29 @@ if symbol_engine == "yolo_trained":
 
 # Defaults when yolo_trained is not selected
 if symbol_engine != "yolo_trained":
-    yolo_weights_path = None
-    yolo_conf = 0.25
+    yolo_weights_path = _default_yolo_path
+    yolo_conf = 0.15
     yolo_iou  = 0.45
 
 
 pipeline_option = st.sidebar.selectbox(
     "Pipeline & Line Tracing Engine",
     options=[
-        "Pathnovo ISA 5.1 Line & Loop Spec Tracer",
         "Computer Vision Line Tracer + VLM Connectivity (Hybrid CV + VLM)",
+        "Pathnovo ISA 5.1 Line & Loop Spec Tracer",
         "Full Multimodal VLM Polyline Tracer (Online API)",
         "Proximity & System Topological Tracer (Local / Offline)",
     ],
     index=0,
-    help="Select line tracer. Pathnovo & CV Line Tracer combine OpenCV line filtering with visual connectivity extraction.",
+    help="Select line tracer. CV Line Tracer combines OpenCV line filtering with visual connectivity extraction.",
 )
 pipeline_engine_map = {
-    "Pathnovo ISA 5.1 Line & Loop Spec Tracer": "pathnovo_pipeline",
     "Computer Vision Line Tracer + VLM Connectivity (Hybrid CV + VLM)": "cv_vlm_tracer",
+    "Pathnovo ISA 5.1 Line & Loop Spec Tracer": "pathnovo_pipeline",
     "Full Multimodal VLM Polyline Tracer (Online API)": "vlm_tracer",
     "Proximity & System Topological Tracer (Local / Offline)": "proximity_tracer",
 }
-pipeline_engine = pipeline_engine_map.get(pipeline_option, "pathnovo_pipeline")
+pipeline_engine = pipeline_engine_map.get(pipeline_option, "cv_vlm_tracer")
 
 llm_provider = "gemini"
 llm_api_key = None

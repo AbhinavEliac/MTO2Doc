@@ -54,7 +54,6 @@ class BaseAgent:
         Uploads a file to the Google GenAI File API using the google-genai Client.
         Polls until the file becomes ACTIVE.
         """
-        from google import genai
         from src.config import GEMINI_API_KEY
         
         if not GEMINI_API_KEY:
@@ -66,6 +65,7 @@ class BaseAgent:
             return None
             
         try:
+            from google import genai
             logger.info(f"Uploading file '{file_path}' to Google GenAI File API...")
             client = genai.Client(api_key=GEMINI_API_KEY)
             uploaded = client.files.upload(file=file_path)
@@ -87,8 +87,8 @@ class BaseAgent:
             else:
                 logger.error(f"File processing failed or timed out. State: {uploaded.state.name}")
                 return None
-        except Exception as e:
-            logger.error(f"Failed to upload file via Google GenAI File API: {e}")
+        except (ImportError, Exception) as e:
+            logger.warning(f"Failed to upload file via Google GenAI File API: {e}")
             return None
 
     def get_target_llm(

@@ -42,6 +42,43 @@ def _is_cuda_available() -> bool:
         return False
 
 
+def _iou_box(b1: Dict[str, Any], b2: Dict[str, Any]) -> float:
+    """Computes Intersection-over-Union (IoU) between two bounding boxes."""
+    ymin1, xmin1, ymax1, xmax1 = b1["ymin"], b1["xmin"], b1["ymax"], b1["xmax"]
+    ymin2, xmin2, ymax2, xmax2 = b2["ymin"], b2["xmin"], b2["ymax"], b2["xmax"]
+
+    inter_ymin = max(ymin1, ymin2)
+    inter_xmin = max(xmin1, xmin2)
+    inter_ymax = min(ymax1, ymax2)
+    inter_xmax = min(xmax1, xmax2)
+
+    inter_w = max(0.0, inter_xmax - inter_xmin)
+    inter_h = max(0.0, inter_ymax - inter_ymin)
+    inter_area = inter_w * inter_h
+
+    area1 = max(0.0, ymax1 - ymin1) * max(0.0, xmax1 - xmin1)
+    area2 = max(0.0, ymax2 - ymin2) * max(0.0, xmax2 - xmin2)
+    union_area = area1 + area2 - inter_area
+    if union_area <= 0:
+        return 0.0
+    return inter_area / union_area
+
+
+def _deduplicate_tiled_boxes(raw_boxes: List[Dict[str, Any]], iou_thresh: float = 0.45) -> List[Dict[str, Any]]:
+    """Applies Non-Maximum Suppression (NMS) on tiled patch detections."""
+    raw_boxes.sort(key=lambda b: b.get("confidence", 0.0), reverse=True)
+    kept = []
+    for box in raw_boxes:
+        overlap = False
+        for k in kept:
+            if box["symbol_type"] == k["symbol_type"] and _iou_box(box, k) > iou_thresh:
+                overlap = True
+                break
+        if not overlap:
+            kept.append(box)
+    return kept
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Drawing-type-aware prompt builders
 # ──────────────────────────────────────────────────────────────────────────────
@@ -220,6 +257,104 @@ class RawPipelineList(BaseModel):
 # AGENT 1: Text Recognition Agent (OCR + Tag & Attribute Parsing)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
+def _inject_datasheet_attributes(
+    structured: List[Dict[str, Any]],
+    ocr_items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Defect 5 Fix: After Layer 2 classification, scan OCR items for equipment
+    datasheet blocks and PSV SP= values, then inject those field values into
+    the matching EQUIPMENT_TAG and PSV_TAG items.
+
+    This populates design_pressure, design_temperature, flow_rate, duty,
+    material, vendor, quantity (for Equipment) and set_pressure (for PSV)
+    which were previously always None/-/N/A in the output.
+    """
+    try:
+        from src.utils.datasheet_parser import (
+            parse_equipment_datasheets,
+            parse_psv_set_pressures,
+        )
+    except ImportError as e:
+        logger.warning(f"datasheet_parser import failed: {e}. Skipping attribute injection.")
+        return structured
+
+    # Build position-aware OCR items list for spatial anchoring
+    pos_items = []
+    for item in structured:
+        attrs = item.get('attributes') or {}
+        cy = float(attrs.get('pos_y', -1)) if attrs.get('pos_y') else -1
+        cx = float(attrs.get('pos_x', -1)) if attrs.get('pos_x') else -1
+        pos_items.append({**item, 'center_y': cy, 'center_x': cx})
+
+    # Also add raw OCR items as position context (they have bbox/center coordinates)
+    for raw in ocr_items:
+        cy = raw.get('center_y') or (raw.get('attributes') or {}).get('pos_y')
+        cx = raw.get('center_x') or (raw.get('attributes') or {}).get('pos_x')
+        if cy is not None and cx is not None and cy != -1 and cx != -1:
+            try:
+                cy = float(cy)
+                cx = float(cx)
+            except (ValueError, TypeError):
+                cy, cx = 0.5, 0.5
+        else:
+            box = raw.get('box') or raw.get('bbox') or []
+            cx, cy = 0.5, 0.5
+            if len(box) >= 4:
+                try:
+                    if isinstance(box[0], (list, tuple)):
+                        # Polygon format: [[x0,y0], [x1,y1], [x2,y2], [x3,y3]]
+                        cy = sum(float(pt[1]) for pt in box[:4]) / 4.0
+                        cx = sum(float(pt[0]) for pt in box[:4]) / 4.0
+                    elif isinstance(box[0], (int, float)):
+                        # Flat box format: [ymin, xmin, ymax, xmax] or [x0, y0, x1, y1]
+                        cy = (float(box[0]) + float(box[2])) / 2.0
+                        cx = (float(box[1]) + float(box[3])) / 2.0
+                except (ValueError, TypeError, IndexError):
+                    cy, cx = 0.5, 0.5
+        pos_items.append({
+            'tag': raw.get('text', ''),
+            'classification': 'NOTE',
+            'value': raw.get('text', ''),
+            'center_y': cy,
+            'center_x': cx,
+            'attributes': {},
+        })
+
+    # Parse datasheets and PSV set pressures
+    datasheet_map = parse_equipment_datasheets(pos_items)
+    psv_sp_map = parse_psv_set_pressures(pos_items)
+
+    # Inject into structured results
+    injected_count = 0
+    for item in structured:
+        tag = item.get('tag') or ''
+        cls = item.get('classification') or ''
+
+        if cls == 'EQUIPMENT_TAG' and tag in datasheet_map:
+            attrs = dict(item.get('attributes') or {})
+            fields = datasheet_map[tag]
+            for field, value in fields.items():
+                if field not in attrs or not attrs[field]:
+                    attrs[field] = value
+                    injected_count += 1
+            item['attributes'] = attrs
+
+        elif cls == 'PSV_TAG' and tag in psv_sp_map:
+            attrs = dict(item.get('attributes') or {})
+            if not attrs.get('set_pressure'):
+                attrs['set_pressure'] = psv_sp_map[tag]
+                injected_count += 1
+            item['attributes'] = attrs
+
+    if injected_count:
+        logger.info(
+            f"Datasheet injection: enriched {injected_count} attribute fields "
+            f"across {len(datasheet_map)} equipment + {len(psv_sp_map)} PSV items."
+        )
+    return structured
+
 class TextRecognitionAgent(BaseAgent):
     """
     Dedicated Text Recognition Agent:
@@ -243,8 +378,11 @@ class TextRecognitionAgent(BaseAgent):
             logger.error("No image pages available for text extraction.")
             return {"extracted_entities": {"text_elements": []}}
 
+        # ── Defect 1 Fix: Only OCR the PRIMARY document, not reference/legend sheets ──
+        # raw_documents[0] is always the primary PDF/image being extracted.
+        # Additional docs (index 1+) are reference sheets — used for legend lookup only.
         raw_image = pages[0] if pages else raw_documents[0]
-        original_doc = raw_documents[0] if raw_documents else raw_image
+        original_doc = raw_documents[0] if raw_documents else raw_image  # PRIMARY DOC ONLY
 
         local_mode = state.get("local_mode", False)
         ocr_engine = state.get("ocr_engine", "paddle").lower()
@@ -276,11 +414,13 @@ class TextRecognitionAgent(BaseAgent):
                 if res_p.get("text_elements"):
                     logger.info(f"Pathnovo ISA 5.1 Engine extracted {len(res_p['text_elements'])} text elements.")
                     return {"extracted_entities": {"text_elements": res_p["text_elements"]}}
+                else:
+                    logger.info("Pathnovo Engine returned 0 text elements. Falling back to local OCR pipeline...")
             except Exception as p_err:
                 logger.warning(f"Pathnovo Engine failed ({p_err}). Falling back to local OCR pipeline.")
 
-        # Option B: PyMuPDF Vector Text Layer
-        if (ocr_engine == "pdf_text" or ocr_engine == "paddle") and original_doc.lower().endswith('.pdf'):
+        # Option B: PyMuPDF Vector Text Layer (for any PDF file)
+        if original_doc.lower().endswith('.pdf'):
             try:
                 from src.utils.paddle_ocr import run_pdf_text_extraction
                 logger.info("Layer 1: Checking PyMuPDF text layer extraction on original PDF...")
@@ -335,7 +475,18 @@ class TextRecognitionAgent(BaseAgent):
             logger.info("Layer 2: Executing Local Rule-Based Classifier (zero LLM tokens)...")
             structured = classify_paddle_results(ocr_items, drawing_type=drawing_type)
             logger.info(f"Layer 2: Rule-based classifier produced {len(structured)} structured items.")
-            return {"extracted_entities": {"text_elements": structured}}
+
+            # ── Defect 5 Fix: inject equipment datasheet fields and PSV set pressures ──
+            structured = _inject_datasheet_attributes(structured, ocr_items)
+
+            # ── Defect 1 Fix: build OCR token set for provenance filter in compiler ──
+            from src.utils.provenance import build_ocr_token_set
+            ocr_token_set = build_ocr_token_set(structured)
+
+            return {
+                "extracted_entities": {"text_elements": structured},
+                "ocr_token_set": ocr_token_set,
+            }
 
         # Option B: Online LLM Deep Reasoning Engine (Qwen 3.7 VL, Gemini, OpenAI, etc.)
         logger.info(f"Layer 2: Executing Online LLM Reasoning Engine using provider '{llm_provider}'...")
@@ -375,7 +526,18 @@ class TextRecognitionAgent(BaseAgent):
 
             extracted_items = [item.model_dump() for item in result.items]
             logger.info(f"Layer 2 Reasoning Engine ({llm_provider}): produced {len(extracted_items)} refined structured entities.")
-            return {"extracted_entities": {"text_elements": extracted_items}}
+
+            # ── Defect 5 Fix: inject equipment datasheet fields and PSV set pressures ──
+            extracted_items = _inject_datasheet_attributes(extracted_items, ocr_items)
+
+            # ── Defect 1 Fix: build OCR token set for provenance filter ──
+            from src.utils.provenance import build_ocr_token_set
+            ocr_token_set = build_ocr_token_set(extracted_items)
+
+            return {
+                "extracted_entities": {"text_elements": extracted_items},
+                "ocr_token_set": ocr_token_set,
+            }
 
         except Exception as llm_err:
             logger.warning(f"Layer 2 Reasoning Engine failed ({llm_err}). Falling back to local rule-based classifier.")
@@ -436,7 +598,7 @@ class SymbolRecognitionAgent(BaseAgent):
                 logger.warning(f"Pathnovo Symbol Parser failed ({p_err}). Falling back to standard VLM pipeline.")
 
         # Option B: Trained YOLOv8 Symbol Detector (custom best.pt from training pipeline)
-        elif symbol_engine == "yolo_trained":
+        if not symbols and symbol_engine == "yolo_trained":
             weights_path = (
                 state.get("yolo_weights_path")
                 or os.getenv("DEFAULT_YOLO_WEIGHTS", "")
@@ -449,57 +611,94 @@ class SymbolRecognitionAgent(BaseAgent):
                 )
             else:
                 try:
+                    import cv2
                     from ultralytics import YOLO
-                    from src.agents.base import BaseAgent as _BA
+                    from training.annotation_generator import SYMBOL_CLASSES
 
                     logger.info(f"SymbolRecognitionAgent: Loading trained YOLOv8 from '{weights_path}'...")
                     yolo_model = YOLO(weights_path)
 
-                    # Encode image for inference
-                    import numpy as np
-                    from PIL import Image as _PilImage
-                    with _PilImage.open(raw_image) as _img:
-                        img_w, img_h = _img.size
-                        _img_rgb = _img.convert("RGB")
+                    conf_thresh = state.get("yolo_conf") or 0.15
+                    iou_thresh = state.get("yolo_iou") or 0.45
 
-                    results = yolo_model.predict(
-                        source=str(raw_image),
-                        conf=state.get("yolo_conf") or 0.25,
-                        iou=state.get("yolo_iou") or 0.45,
-                        imgsz=800,          # Match training imgsz
-                        device="0" if _is_cuda_available() else "cpu",
-                        verbose=False,
-                    )
+                    img_cv = cv2.imread(raw_image)
+                    if img_cv is not None:
+                        H, W, _ = img_cv.shape
+                        raw_boxes = []
 
-                    # YOLO class names from the training annotation_generator
-                    from training.annotation_generator import SYMBOL_CLASSES
+                        # Tiled Patch Inference for large full-page engineering drawings
+                        if W > 1200 or H > 1200:
+                            logger.info(
+                                f"SymbolRecognitionAgent: Large image ({W}x{H}px). "
+                                f"Running Tiled Patch Inference (800x800 tiles, conf={conf_thresh})..."
+                            )
+                            tile_size = 800
+                            stride = 500
 
-                    for result in results:
-                        for box in result.boxes:
-                            cls_id   = int(box.cls[0].item())
-                            conf_val = float(box.conf[0].item())
-                            # box.xyxyn → normalized [x1, y1, x2, y2]
-                            x1n, y1n, x2n, y2n = box.xyxyn[0].tolist()
-                            sym_type = SYMBOL_CLASSES[cls_id] if cls_id < len(SYMBOL_CLASSES) else "UNKNOWN"
+                            for y in range(0, H, stride):
+                                for x in range(0, W, stride):
+                                    x2 = min(x + tile_size, W)
+                                    y2 = min(y + tile_size, H)
+                                    tile = img_cv[y:y2, x:x2]
 
-                            symbols.append({
-                                "symbol_type" : sym_type,
-                                "inferred_tag": None,
-                                "ymin"        : round(y1n, 4),
-                                "xmin"        : round(x1n, 4),
-                                "ymax"        : round(y2n, 4),
-                                "xmax"        : round(x2n, 4),
-                                "confidence"  : round(conf_val, 3),
-                            })
+                                    res = yolo_model.predict(
+                                        source=tile,
+                                        conf=conf_thresh,
+                                        iou=iou_thresh,
+                                        imgsz=800,
+                                        device="0" if _is_cuda_available() else "cpu",
+                                        verbose=False,
+                                    )
+
+                                    for box in res[0].boxes:
+                                        cls_id = int(box.cls[0].item())
+                                        conf_val = float(box.conf[0].item())
+                                        tx1, ty1, tx2, ty2 = box.xyxy[0].tolist()
+                                        gx1, gy1, gx2, gy2 = x + tx1, y + ty1, x + tx2, y + ty2
+
+                                        sym_type = SYMBOL_CLASSES[cls_id] if cls_id < len(SYMBOL_CLASSES) else "UNKNOWN"
+                                        raw_boxes.append({
+                                            "symbol_type": sym_type,
+                                            "inferred_tag": None,
+                                            "ymin": round(max(0.0, gy1 / H), 4),
+                                            "xmin": round(max(0.0, gx1 / W), 4),
+                                            "ymax": round(min(1.0, gy2 / H), 4),
+                                            "xmax": round(min(1.0, gx2 / W), 4),
+                                            "confidence": round(conf_val, 3),
+                                        })
+
+                            # Deduplicate overlapping tiled boxes
+                            symbols = _deduplicate_tiled_boxes(raw_boxes, iou_thresh=iou_thresh)
+                        else:
+                            results = yolo_model.predict(
+                                source=str(raw_image),
+                                conf=conf_thresh,
+                                iou=iou_thresh,
+                                imgsz=800,
+                                device="0" if _is_cuda_available() else "cpu",
+                                verbose=False,
+                            )
+
+                            for result in results:
+                                for box in result.boxes:
+                                    cls_id   = int(box.cls[0].item())
+                                    conf_val = float(box.conf[0].item())
+                                    x1n, y1n, x2n, y2n = box.xyxyn[0].tolist()
+                                    sym_type = SYMBOL_CLASSES[cls_id] if cls_id < len(SYMBOL_CLASSES) else "UNKNOWN"
+
+                                    symbols.append({
+                                        "symbol_type" : sym_type,
+                                        "inferred_tag": None,
+                                        "ymin"        : round(y1n, 4),
+                                        "xmin"        : round(x1n, 4),
+                                        "ymax"        : round(y2n, 4),
+                                        "xmax"        : round(x2n, 4),
+                                        "confidence"  : round(conf_val, 3),
+                                    })
 
                     logger.info(
                         f"SymbolRecognitionAgent (yolo_trained): detected {len(symbols)} symbols "
                         f"from '{os.path.basename(weights_path)}'."
-                    )
-                except ImportError:
-                    logger.error(
-                        "ultralytics not installed. Run: pip install ultralytics. "
-                        "Falling back to heuristic harvester."
                     )
                 except Exception as yolo_err:
                     logger.error(f"Trained YOLOv8 inference failed ({yolo_err}). Falling back to heuristic harvester.")

@@ -317,6 +317,112 @@ _OCR_CORRECTIONS = [
 ]
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Defect 3 Fix: Setpoint negative-context guard
+# Prevents setpoint numbers (PI-150, AT-225) being classified as instrument tags
+# ──────────────────────────────────────────────────────────────────────────────
+_SETPOINT_CONTEXT_RE = re.compile(
+    r'\b(?:SD|HH|LL|HIGH\s*HIGH|LOW\s*LOW|TRIP|SHUT\s*DOWN|'
+    r'SP\s*=|SET\s*PRESS(?:URE)?|SETPOINT|'
+    r'MAX(?:IMUM)?|MIN(?:IMUM)?|DESIGN|'
+    r'MAWP|MAPD|MOP|MAOP|'
+    r'BARG|BAR\(G\)|PSIG|KPAG|MPA(?:G)?|'
+    r'\d+\.\d+\s*BAR|\d+\s*°[CF]|\d+\s*DEG(?:REE)?|'
+    r'H\s*:|L\s*:|HH\s*:|LL\s*:|ALARM|INTERLOCK)',
+    re.IGNORECASE
+)
+
+_WINDOW = 35  # characters to scan before/after match for setpoint context
+
+
+def _is_setpoint_context(full_text: str, match_start: int, match_end: int) -> bool:
+    """
+    Returns True if a setpoint/note keyword appears within _WINDOW chars
+    before or after the instrument tag match position.
+    This prevents classifying 'PI-150' in 'SD HH: 150 barg' as a real tag.
+    """
+    window_text = full_text[max(0, match_start - _WINDOW): match_end + _WINDOW]
+    return bool(_SETPOINT_CONTEXT_RE.search(window_text))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Defect 4 Fix: Line tag grammar enforcement helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Strip NOTE xx references before line-tag matching
+_NOTE_REF_STRIP_RE = re.compile(r'\s*NOTE\s*\d+', re.IGNORECASE)
+
+# Valid nominal pipe sizes (NPS inches and DN metric)
+_VALID_INCH_SIZES = {
+    '1/2', '3/4', '1', '1-1/4', '1-1/2', '2', '2-1/2', '3', '4',
+    '6', '8', '10', '12', '14', '16', '18', '20', '24',
+}
+_VALID_MM_SIZES = {
+    '15mm', '20mm', '25mm', '32mm', '40mm', '50mm', '65mm', '80mm',
+    '100mm', '125mm', '150mm', '200mm', '250mm', '300mm', '350mm',
+    '400mm', '450mm', '500mm', '600mm',
+}
+# Reject tokens where the numeric prefix has > 3 consecutive digits with inch mark
+# (e.g. 262" is impossible, 12" is valid) OR bare digit-only size > 24" (> 600mm)
+_CORRUPT_SIZE_RE = re.compile(r'^(\d{4,})"?$', re.IGNORECASE)
+
+
+def _validate_line_tag_size(tag: str) -> tuple:
+    """
+    Validate the size prefix of a line tag.
+    Returns (is_valid: bool, flag_reason: str or None).
+    """
+    parts = tag.split('-')
+    if not parts:
+        return True, None
+    p0 = parts[0].strip()
+    # Check if there is a size token at all
+    if not re.match(r'^[\d/]', p0):
+        return True, None  # No size prefix — that's OK
+    has_inch = '"' in p0 or "'" in p0
+    # Strip inch mark and whitespace for comparison
+    size_clean = p0.replace('"', '').replace("'", '').replace(' ', '').lower()
+    # Reject corrupt large sizes (e.g. 262", 1000")
+    if _CORRUPT_SIZE_RE.match(p0) or (has_inch and size_clean.isdigit() and int(size_clean) > 60):
+        return False, f'invalid_pipe_size_corrupt_merge({p0})'
+    size_with_mm = size_clean + 'mm' if size_clean.isdigit() else size_clean
+    if size_clean in _VALID_INCH_SIZES or size_with_mm in _VALID_MM_SIZES:
+        return True, None
+    # Accept fractional sizes like 3/4
+    if re.match(r'^\d+/\d+$', size_clean):
+        if size_clean in _VALID_INCH_SIZES:
+            return True, None
+        # Fraction not in whitelist — flag but keep
+        return True, 'unrecognized_fraction_size'
+    # Numeric but not in whitelist
+    if re.match(r'^\d+$', size_clean):
+        try:
+            n = int(size_clean)
+            if has_inch and n > 60:
+                return False, f'invalid_pipe_size_corrupt_merge({p0})'
+            if 1 <= n <= 600:  # plausible DN size
+                return True, 'unverified_size_token'
+        except ValueError:
+            pass
+        return False, f'invalid_pipe_size_out_of_range({p0})'
+    return True, None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Defect 2 Fix: Tag canonicalization for deduplication
+# ──────────────────────────────────────────────────────────────────────────────
+_AREA_PREFIX_RE = re.compile(r'^\d{2,3}-', re.IGNORECASE)
+
+
+def canonicalize_tag(tag: str) -> str:
+    """
+    Strip leading unit/area number prefix (e.g. '26-', '43-') from a tag
+    to get the canonical form used for deduplication.
+    '26-PIT-9087' → 'PIT-9087',  'PIT-9087' → 'PIT-9087'
+    """
+    return _AREA_PREFIX_RE.sub('', tag.strip().upper())
+
+
 def _ocr_correct(text: str) -> str:
     """Apply context-aware OCR character corrections before regex classification."""
     for pattern, replacement in _OCR_CORRECTIONS:
@@ -337,14 +443,21 @@ def classify_paddle_results(
 ) -> List[Dict[str, Any]]:
     """
     Scan ALL OCR items for embedded engineering tags using drawing-type-aware patterns.
+
+    Fixes applied:
+      Defect 2: Post-deduplication pass — merges short/prefixed tag variants by canonical key.
+      Defect 3: Setpoint negative-context filter — prevents PI-150, AT-225 hallucinations.
+      Defect 4: Line-tag grammar validation — validates pipe-size tokens and strips NOTE refs.
+
     Retains ALL non-tag text lines as NOTE annotations so 100% of readable text is preserved.
+    Adds 'confidence' and 'flag_reason' to every returned item.
     """
-    found: Dict[str, Dict] = {}  # tag → item (deduplicated by tag string)
+    found: Dict[str, Dict] = {}  # tag → item (deduplicated by EXACT tag string)
     dt = (drawing_type or 'PID').upper()
 
     for item in items:
         text = item.get('text', '').strip()
-        conf = item.get('confidence', 0)
+        conf = float(item.get('confidence', 0))
 
         if conf < 0.10 or not text:
             continue
@@ -357,6 +470,7 @@ def classify_paddle_results(
         item_added = False
 
         # ── 1. Specific Engineering Tag Extraction ─────────────────────────────
+
         # PSV tags
         for m in _PSV_SEARCH.finditer(t):
             tag = m.group(1).upper()
@@ -364,11 +478,32 @@ def classify_paddle_results(
                 found[tag] = _make_item(tag, 'PSV_TAG', conf, item)
                 item_added = True
 
-        # Line tags
+        # Line tags — Defect 4: strip NOTE refs, validate pipe size
         for m in _LINE_SEARCH.finditer(t):
-            tag = re.sub(r'\s+', '', m.group(1)).upper()
+            raw_tag = m.group(1)
+            # Strip NOTE xx references before processing
+            raw_tag_clean = _NOTE_REF_STRIP_RE.sub('', raw_tag).strip().rstrip('-')
+            tag = re.sub(r'\s+', '', raw_tag_clean).upper()
+            if not tag or len(tag) < 4:
+                continue
+            flag_reason = None
+            tag_conf = conf
+            size_valid, size_flag = _validate_line_tag_size(tag)
+            if not size_valid:
+                # Invalid size — flag but emit for human review
+                flag_reason = size_flag
+                tag_conf = min(conf, 0.5)
+            elif size_flag:
+                flag_reason = size_flag
+                tag_conf = min(conf, 0.75)
+            if raw_tag_clean != raw_tag.strip():
+                # NOTE was stripped — record it
+                note_ref = _NOTE_REF_STRIP_RE.search(raw_tag)
+                if note_ref and not flag_reason:
+                    flag_reason = f'note_ref_stripped({note_ref.group().strip()})'
             if tag not in found:
-                found[tag] = _make_item(tag, 'LINE_TAG', conf, item)
+                found[tag] = _make_item(tag, 'LINE_TAG', tag_conf, item,
+                                        flag_reason=flag_reason)
                 item_added = True
 
         # Project-prefix tags (instruments + equipment)
@@ -383,8 +518,6 @@ def classify_paddle_results(
                 continue
             if full_tag in found and found[full_tag]['classification'] != 'NOTE':
                 continue
-            # ISA 5.1 valve codes with 4+ digit sequence → always VALVE_TAG
-            # (GB, CB, BL, GT are valves when seq >= 4 digits; equipment when seq <= 3)
             _VALVE_FUNCTION_CODES = {'CB', 'GB', 'BL', 'GT', 'BT', 'GL', 'NV'}
             if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 4:
                 cat = 'VALVE_TAG'
@@ -400,12 +533,21 @@ def classify_paddle_results(
                 found[full_tag] = _make_item(full_tag, cat, conf, item)
                 item_added = True
 
-        # Bare instrument tags
+        # Bare instrument tags — Defect 3: setpoint negative-context guard
         for m in _BARE_INSTRUMENT_SEARCH.finditer(t):
             tag = m.group(1).upper()
-            if tag not in found:
+            if tag in found:
+                continue
+            if _is_setpoint_context(t, m.start(), m.end()):
+                # Matches setpoint-like context — demote to NOTE with flag
+                found[tag] = _make_item(
+                    tag, 'NOTE', min(conf, 0.25), item,
+                    flag_reason='ambiguous_setpoint_vs_tag'
+                )
+                logger.debug(f"Setpoint guard: demoted '{tag}' to NOTE (context: '{t[:60]}...')")
+            else:
                 found[tag] = _make_item(tag, 'INSTRUMENT_TAG', conf, item)
-                item_added = True
+            item_added = True
 
         # Valve tags
         for m in _VALVE_SEARCH.finditer(t):
@@ -415,7 +557,7 @@ def classify_paddle_results(
                     found[tag] = _make_item(tag, 'VALVE_TAG', conf, item)
                     item_added = True
 
-        # Electrical / Earthing / SLD / Lighting patterns (un-gated for 100% sensitivity across all drawing types)
+        # Electrical / Earthing / SLD / Lighting patterns
         for m in _EARTH_BAR_SEARCH.finditer(t):
             tag = m.group(1).upper()
             if tag not in found:
@@ -447,15 +589,13 @@ def classify_paddle_results(
                 found[tag] = _make_item(tag, 'LUMINAIRE_TAG', conf, item)
                 item_added = True
 
-        # Generic equipment — guarded with prefix allowlist (Fix 4)
+        # Generic equipment — guarded with prefix allowlist
         for m in _GENERIC_EQUIP_PATTERN.finditer(t):
             tag = m.group(1).upper()
             if tag not in found:
                 prefix = tag.split('-')[0].upper()
-                # Reject spec codes, service codes (PV-26, VA-26), and drawing refs
                 if _SPEC_CODE_PATTERN.match(tag) or _SERVICE_CODE_PATTERN.match(tag):
                     continue
-                # Only accept known equipment prefixes; reject spec codes / line refs
                 if (prefix in _EQUIP_PREFIX_ALLOWLIST
                         and not _EQUIP_REJECT_PATTERN.match(tag)
                         and len(prefix) <= 3):
@@ -477,10 +617,40 @@ def classify_paddle_results(
                 item_added = True
 
         # ── 2. Universal Note Preservation ────────────────────────────────────
-        # If the item did not contain a specific tag, preserve it as a NOTE
         if not item_added and len(t) >= 3:
             if t not in found:
                 found[t] = _make_item(t, 'NOTE', conf, item)
+
+    # ── Defect 2 Fix: Post-deduplication pass ─────────────────────────────────
+    # Merge items whose canonical form (strip area prefix) is identical.
+    # Keep the longer (project-prefixed) tag; record short form as alias.
+    canonical_map: Dict[str, str] = {}  # canonical_key → winning raw tag
+    _ENG_CLASSES = {
+        'INSTRUMENT_TAG', 'VALVE_TAG', 'EQUIPMENT_TAG', 'PSV_TAG', 'LINE_TAG',
+    }
+    for tag, item in list(found.items()):
+        if item['classification'] not in _ENG_CLASSES:
+            continue
+        ck = canonicalize_tag(tag)
+        if ck in canonical_map:
+            winner_tag = canonical_map[ck]
+            loser_tag = tag
+            # Prefer the longer (project-prefixed) form
+            if len(tag) > len(winner_tag):
+                winner_tag, loser_tag = tag, winner_tag
+                canonical_map[ck] = winner_tag
+            # Merge alias into winner
+            winner_item = found[winner_tag]
+            aliases = winner_item.get('aliases') or []
+            if loser_tag not in aliases and loser_tag != winner_tag:
+                aliases.append(loser_tag)
+            winner_item['aliases'] = aliases
+            # Remove loser from found (replaced by winner)
+            if loser_tag in found and loser_tag != winner_tag:
+                del found[loser_tag]
+                logger.debug(f"Dedup: merged '{loser_tag}' into '{winner_tag}' (alias)")
+        else:
+            canonical_map[ck] = tag
 
     results = list(found.values())
 
@@ -495,18 +665,28 @@ def classify_paddle_results(
     results.sort(key=lambda x: priority.get(x['classification'], 99))
 
     breakdown = {}
+    flagged = 0
     for r in results:
         breakdown[r['classification']] = breakdown.get(r['classification'], 0) + 1
+        if r.get('flag_reason'):
+            flagged += 1
     logger.info(
         f"[{dt}] Tag classifier extracted {len(results)} total items from "
         f"{len(items)} OCR items. Breakdown: "
         + ', '.join(f"{k}:{v}" for k, v in sorted(breakdown.items()))
+        + (f" | Flagged: {flagged}" if flagged else "")
     )
     return results
 
 
-def _make_item(tag: str, classification: str, conf: float, raw_item: dict) -> dict:
-    """Create a structured classification result dict."""
+def _make_item(
+    tag: str,
+    classification: str,
+    conf: float,
+    raw_item: dict,
+    flag_reason: Optional[str] = None,
+) -> dict:
+    """Create a structured classification result dict with confidence and flag_reason."""
     attrs = {
         'ocr_confidence': str(round(conf, 2)),
         'pos_x': str(raw_item.get('center_x', 0)),
@@ -518,6 +698,9 @@ def _make_item(tag: str, classification: str, conf: float, raw_item: dict) -> di
         'value': tag,
         'rating': None,
         'attributes': attrs,
+        'confidence': round(conf, 3),
+        'flag_reason': flag_reason,
+        'aliases': [],
     }
 
 

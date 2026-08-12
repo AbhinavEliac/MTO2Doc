@@ -94,6 +94,7 @@ def launch_yolo_training(
     batch: int = 8,
     model: str = "yolov8m.pt",
     project_name: str = "pid_symbol_detector",
+    fresh: bool = False,
 ) -> str:
     """
     Launches YOLOv8 training on the annotated P&ID symbol dataset.
@@ -104,6 +105,7 @@ def launch_yolo_training(
         batch: Batch size (8 recommended for RTX 3050 4GB)
         model: YOLOv8 model variant (yolov8n/s/m/l/x)
         project_name: Training run project name
+        fresh: If True, archive existing run and start training fresh from scratch
 
     Returns:
         Path to trained weights (best.pt)
@@ -132,16 +134,48 @@ def launch_yolo_training(
     output_dir = Path(__file__).parent / "outputs" / "yolo_runs"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check if last.pt exists for resuming training from epoch 21
-    last_ckpt = output_dir / project_name / "weights" / "last.pt"
+    run_dir = output_dir / project_name
+    last_ckpt = run_dir / "weights" / "last.pt"
+    results_csv = run_dir / "results.csv"
 
     resume_flag = False
-    if last_ckpt.exists():
-        logger.info(f"Checkpoint found at '{last_ckpt}' — resuming training from last epoch...")
-        model_to_load = str(last_ckpt)
-        resume_flag = True
+    if fresh and run_dir.exists():
+        import shutil
+        import datetime
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = output_dir / f"{project_name}_run_{ts}"
+        shutil.move(str(run_dir), str(backup_dir))
+        logger.info(f"Fresh run requested. Archived previous run to '{backup_dir}'")
+        model_to_load = model
+        resume_flag = False
+    elif last_ckpt.exists():
+        completed_epochs = 0
+        if results_csv.exists():
+            try:
+                import csv
+                with open(results_csv, "r", encoding="utf-8") as f:
+                    reader = csv.reader(f)
+                    next(reader, None) # skip header
+                    completed_epochs = len(list(reader))
+            except Exception:
+                pass
+
+        if completed_epochs >= epochs:
+            import shutil
+            import datetime
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_dir = output_dir / f"{project_name}_run_{ts}"
+            logger.info(f"Previous run reached {completed_epochs}/{epochs} epochs. Archiving to '{backup_dir}' and starting fresh...")
+            shutil.move(str(run_dir), str(backup_dir))
+            model_to_load = model
+            resume_flag = False
+        else:
+            logger.info(f"Checkpoint found at '{last_ckpt}' ({completed_epochs}/{epochs} epochs done) — resuming training...")
+            model_to_load = str(last_ckpt)
+            resume_flag = True
     else:
         model_to_load = model
+        resume_flag = False
 
     # Check GPU availability
     cuda_ok = _check_cuda_available()
