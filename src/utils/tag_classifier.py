@@ -563,17 +563,6 @@ def classify_paddle_results(
             if full_tag in found and found[full_tag]['classification'] != 'NOTE':
                 continue
 
-            # Defect 3 Fix: Check setpoint context before emitting instrument tags
-            if code in _INSTRUMENT_CODES or (len(seq) >= 4 and code not in _EQUIPMENT_CODES):
-                if _is_setpoint_context_spatial(item_idx, items) or _is_setpoint_context(t, m.start(), m.end()):
-                    found[full_tag] = _make_item(
-                        full_tag, 'NOTE', 0.15, item,
-                        flag_reason='ambiguous_setpoint_vs_tag'
-                    )
-                    item_added = True
-                    logger.debug(f"Setpoint guard: demoted '{full_tag}' to NOTE")
-                    continue
-
             _VALVE_FUNCTION_CODES = {'CB', 'GB', 'BL', 'GT', 'BT', 'GL', 'NV'}
             if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 4:
                 cat = 'VALVE_TAG'
@@ -590,22 +579,24 @@ def classify_paddle_results(
                 found[full_tag] = _make_item(full_tag, cat, conf, item)
                 item_added = True
 
-        # Bare instrument tags — Defect 3: setpoint negative-context guard
+        # Bare instrument tags — Defect 3: setpoint negative-context guard for 3-digit setpoints
         for m in _BARE_INSTRUMENT_SEARCH.finditer(t):
             tag = m.group(1).upper()
             if tag in found:
                 continue
-            if _is_setpoint_context_spatial(item_idx, items) or _is_setpoint_context(t, m.start(), m.end()):
-                # Matches setpoint-like context — demote to NOTE with flag
+            seq_num = re.sub(r'\D', '', tag)
+            is_3digit_setpoint = len(seq_num) == 3
+            if is_3digit_setpoint and (_is_setpoint_context_spatial(item_idx, items) or _is_setpoint_context(t, m.start(), m.end())):
+                # 3-digit candidate matches setpoint context (e.g. PI-150 in SD HH: 150) — demote to NOTE
                 found[tag] = _make_item(
                     tag, 'NOTE', 0.15, item,
                     flag_reason='ambiguous_setpoint_vs_tag'
                 )
-                logger.debug(f"Setpoint guard: demoted bare '{tag}' to NOTE")
+                logger.debug(f"Setpoint guard: demoted bare setpoint '{tag}' to NOTE")
             else:
+                # Real bare instrument tag (e.g. TIT-9025, PIT-9016)
                 found[tag] = _make_item(
-                    tag, 'INSTRUMENT_TAG', min(conf, 0.60), item,
-                    flag_reason='unverified_bare_instrument_tag'
+                    tag, 'INSTRUMENT_TAG', min(conf, 0.85), item
                 )
             item_added = True
 

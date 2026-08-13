@@ -79,3 +79,32 @@ class TestLineTagGrammar:
             "Expected a flag_reason for out-of-range size 900"
         )
 
+    def test_line_from_to_spatial_isolation(self):
+        """
+        Priority 2 Fix: Assert that an off-page annotation text (FROM 27-PIT-0001B)
+        is ONLY assigned to the line spatially adjacent to it, and unrelated lines
+        elsewhere on the sheet do NOT inherit that annotation string.
+        """
+        from src.agents.compiler import CompilerAgent
+        from src.models import UniversalEngineeringGraph
+
+        compiler = CompilerAgent()
+        texts = [
+            {"value": "FROM 27-PIT-0001B IN 3RD STAGE", "classification": "NOTE", "attributes": {"pos_x": 0.10, "pos_y": 0.10}},
+            {"value": "8\"-PV-26-9035-FC11S-08", "classification": "LINE_TAG", "tag": "8\"-PV-26-9035-FC11S-08", "attributes": {"pos_x": 0.11, "pos_y": 0.11}},
+            {"value": "3\"-VA-26-9121-AC21-00", "classification": "LINE_TAG", "tag": "3\"-VA-26-9121-AC21-00", "attributes": {"pos_x": 0.85, "pos_y": 0.85}},
+        ]
+        geom = {"traces": [
+            {"tag": "8\"-PV-26-9035-FC11S-08", "grid_path": [[0.11, 0.11]]},
+            {"tag": "3\"-VA-26-9121-AC21-00", "grid_path": [[0.85, 0.85]]},
+        ]}
+        lines = compiler._compile_lines(texts, geom, [])
+
+        line1 = next(l for l in lines if "9035" in l.tag)
+        line2 = next(l for l in lines if "9121" in l.tag)
+
+        # Line 1 (close at 0.11, 0.11) SHOULD get the off-page callout
+        assert line1.from_node is not None and "27-PIT-0001B" in line1.from_node
+        # Line 2 (far away at 0.85, 0.85) MUST NOT inherit that callout
+        assert line2.from_node is None
+

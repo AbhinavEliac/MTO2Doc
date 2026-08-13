@@ -126,3 +126,19 @@ class TestSetpointFilter:
         ]
         assert _is_setpoint_context_spatial(0, items) is True
 
+    def test_real_instrument_next_to_setpoint_text_kept(self):
+        """
+        Priority 1 Fix: Real instrument TIT-9025 adjacent to 'SD HH: 150 BARG'
+        must be KEPT as INSTRUMENT_TAG, while bare setpoint PI-150 must be REJECTED.
+        """
+        items = [
+            {"text": "26-TIT-9025", "confidence": 0.95, "center_x": 0.50, "center_y": 0.30},
+            {"text": "TIT-9025", "confidence": 0.95, "center_x": 0.50, "center_y": 0.31},
+            {"text": "SD HH: 150 BARG", "confidence": 0.95, "center_x": 0.52, "center_y": 0.32},
+            {"text": "PI-150", "confidence": 0.95, "center_x": 0.52, "center_y": 0.33},
+        ]
+        result = classify_paddle_results(items, drawing_type="PID")
+        inst_tags = [r["tag"] for r in result if r["classification"] == "INSTRUMENT_TAG"]
+        assert "26-TIT-9025" in inst_tags or "TIT-9025" in inst_tags
+        assert "PI-150" not in inst_tags
+

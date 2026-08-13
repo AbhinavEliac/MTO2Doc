@@ -285,8 +285,12 @@ def _inject_datasheet_attributes(
     pos_items = []
     for item in structured:
         attrs = item.get('attributes') or {}
-        cy = float(attrs.get('pos_y', -1)) if attrs.get('pos_y') else -1
-        cx = float(attrs.get('pos_x', -1)) if attrs.get('pos_x') else -1
+        cy = float(attrs.get('pos_y', -1)) if attrs.get('pos_y') else -1.0
+        cx = float(attrs.get('pos_x', -1)) if attrs.get('pos_x') else -1.0
+        if cy > 1.0:
+            cy = cy / 2338.0
+        if cx > 1.0:
+            cx = cx / 3300.0
         pos_items.append({**item, 'center_y': cy, 'center_x': cx})
 
     # Also add raw OCR items as position context (they have bbox/center coordinates)
@@ -297,6 +301,10 @@ def _inject_datasheet_attributes(
             try:
                 cy = float(cy)
                 cx = float(cx)
+                if cy > 1.0:
+                    cy = cy / 2338.0
+                if cx > 1.0:
+                    cx = cx / 3300.0
             except (ValueError, TypeError):
                 cy, cx = 0.5, 0.5
         else:
@@ -310,6 +318,10 @@ def _inject_datasheet_attributes(
                     elif isinstance(box[0], (int, float)):
                         cy = (float(box[0]) + float(box[2])) / 2.0
                         cx = (float(box[1]) + float(box[3])) / 2.0
+                    if cy > 1.0:
+                        cy = cy / 2338.0
+                    if cx > 1.0:
+                        cx = cx / 3300.0
                 except (ValueError, TypeError, IndexError):
                     cy, cx = 0.5, 0.5
         pos_items.append({
@@ -326,28 +338,53 @@ def _inject_datasheet_attributes(
     psv_sp_map = parse_psv_set_pressures(pos_items)
     psv_flange_map = parse_psv_flange_specs(pos_items)
 
+    from src.utils.tag_classifier import canonicalize_tag
+
     # Inject into structured results
     injected_count = 0
     for item in structured:
         tag = item.get('tag') or ''
         cls = item.get('classification') or ''
 
-        if cls == 'EQUIPMENT_TAG' and tag in datasheet_map:
+        if cls == 'EQUIPMENT_TAG':
             attrs = dict(item.get('attributes') or {})
-            fields = datasheet_map[tag]
-            for field, value in fields.items():
-                if field not in attrs or not attrs[field]:
-                    attrs[field] = value
-                    injected_count += 1
-            item['attributes'] = attrs
+            c_tag = canonicalize_tag(tag)
+            fields = datasheet_map.get(tag) or datasheet_map.get(tag.upper()) or datasheet_map.get(c_tag)
+            if not fields:
+                for k, v in datasheet_map.items():
+                    if canonicalize_tag(k) == c_tag:
+                        fields = v
+                        break
+            if fields:
+                for field, value in fields.items():
+                    if field not in attrs or not attrs[field]:
+                        attrs[field] = value
+                        injected_count += 1
+                item['attributes'] = attrs
 
         elif cls == 'PSV_TAG':
             attrs = dict(item.get('attributes') or {})
-            if tag in psv_sp_map and not attrs.get('set_pressure'):
-                attrs['set_pressure'] = psv_sp_map[tag]
+            c_tag = canonicalize_tag(tag)
+            base_key = re.sub(r'[A-Z]$', '', c_tag)
+
+            sp_val = psv_sp_map.get(tag) or psv_sp_map.get(c_tag)
+            if not sp_val:
+                for k, v in psv_sp_map.items():
+                    if re.sub(r'[A-Z]$', '', canonicalize_tag(k)) == base_key:
+                        sp_val = v
+                        break
+            if sp_val and not attrs.get('set_pressure'):
+                attrs['set_pressure'] = sp_val
                 injected_count += 1
-            if tag in psv_flange_map:
-                for k, v in psv_flange_map[tag].items():
+
+            flange_val = psv_flange_map.get(tag) or psv_flange_map.get(c_tag)
+            if not flange_val:
+                for k, v in psv_flange_map.items():
+                    if re.sub(r'[A-Z]$', '', canonicalize_tag(k)) == base_key:
+                        flange_val = v
+                        break
+            if flange_val:
+                for k, v in flange_val.items():
                     if k not in attrs or not attrs[k]:
                         attrs[k] = v
                         injected_count += 1

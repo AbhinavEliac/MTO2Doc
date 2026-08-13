@@ -179,3 +179,42 @@ class TestEquipmentDatasheet:
         assert flange["outlet_size"] == '4"'
         assert flange["inlet_spec"] == "300#"
 
+    def test_twin_psv_flange_spec_inheritance(self):
+        """
+        Priority 4 Fix: Twin PSVs 26-PSV-9027A and 26-PSV-9027B must both inherit
+        flange specs extracted from the shared cluster.
+        """
+        from src.agents.parallel_vision import _inject_datasheet_attributes
+        structured = [
+            {"tag": "26-PSV-9027A", "classification": "PSV_TAG", "attributes": {"pos_y": 0.50, "pos_x": 0.50}},
+            {"tag": "26-PSV-9027B", "classification": "PSV_TAG", "attributes": {"pos_y": 0.52, "pos_x": 0.50}},
+        ]
+        ocr_items = [
+            {"text": '3"x4" 300# 150#', "center_y": 0.51, "center_x": 0.50},
+        ]
+        enriched = _inject_datasheet_attributes(structured, ocr_items)
+        psv_a = next(i for i in enriched if i["tag"] == "26-PSV-9027A")
+        psv_b = next(i for i in enriched if i["tag"] == "26-PSV-9027B")
+
+        assert psv_a["attributes"].get("inlet_size") == '3"'
+        assert psv_b["attributes"].get("inlet_size") == '3"'
+
+    def test_equipment_completeness_confidence_scaling(self):
+        """
+        Criteria 5 Fix: Equipment with full 7/7 datasheet fields must have 1.0 (100%) confidence,
+        while equipment with 0 datasheet fields must have 0.60 (60%) confidence.
+        """
+        from src.agents.compiler import CompilerAgent
+        compiler = CompilerAgent()
+
+        full_eq = [{"classification": "EQUIPMENT_TAG", "tag": "26-KA-902", "value": "Compressor",
+                    "attributes": {"duty": "1835 kW", "flow_rate": "62809 kg/h", "design_pressure": "286 Barg",
+                                   "design_temperature": "160 C", "material": "LTCS", "vendor": "MAN", "quantity": "1"}}]
+        empty_eq = [{"classification": "EQUIPMENT_TAG", "tag": "26-KA-903", "value": "Compressor", "attributes": {}}]
+
+        res_full = compiler._compile_equipment(full_eq, [])
+        res_empty = compiler._compile_equipment(empty_eq, [])
+
+        assert res_full[0].confidence == 1.0
+        assert res_empty[0].confidence == 0.60
+

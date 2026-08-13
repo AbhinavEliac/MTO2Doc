@@ -221,7 +221,14 @@ class CompilerAgent(BaseAgent):
             # ── Defect 5 Fix: populate datasheet fields from injected attributes ──
             attrs = eq.get("attributes") or {}
             aliases = eq.get("aliases") or []
-            confidence = float(eq.get("confidence", 1.0))
+
+            # Calculate dynamic completeness-based confidence
+            datasheet_keys = ["design_pressure", "design_temperature", "flow_rate", "duty", "material", "vendor", "quantity"]
+            populated_count = sum(1 for k in datasheet_keys if attrs.get(k))
+            if populated_count > 0:
+                confidence = round(0.60 + 0.40 * (populated_count / 7.0), 2)
+            else:
+                confidence = 0.60
 
             item_obj = EquipmentItem(
                 tag=tag,
@@ -312,26 +319,62 @@ class CompilerAgent(BaseAgent):
                     elif ttag == tag:
                         from_node = stag
 
-            # Item 8 Fix: Parse off-page destination callouts (TO LP FLARE, TO CLOSED DRAIN)
+            # Calculate line center position for spatial association
+            line_y, line_x = -1.0, -1.0
+            if path_coords and len(path_coords) >= 1:
+                try:
+                    line_y = sum(float(pt[1]) for pt in path_coords if len(pt) >= 2) / float(len(path_coords))
+                    line_x = sum(float(pt[0]) for pt in path_coords if len(pt) >= 2) / float(len(path_coords))
+                except (ValueError, TypeError, ZeroDivisionError):
+                    line_y, line_x = -1.0, -1.0
+            if line_y < 0:
+                for t in texts:
+                    if t.get("tag") == tag or t.get("value") == tag:
+                        attrs = t.get("attributes") or {}
+                        line_y = float(attrs.get("pos_y", -1)) if attrs.get("pos_y") else -1.0
+                        line_x = float(attrs.get("pos_x", -1)) if attrs.get("pos_x") else -1.0
+                        break
+
+            # Item 8 Fix: Parse off-page destination callouts (TO LP FLARE, TO CLOSED DRAIN) with SPATIAL PROXIMITY
             if not to_node:
+                best_to_dest = None
+                best_to_dist = 0.15
                 for t in texts:
                     val = t.get("value") or ""
                     m_to = re.search(r'\bTO\s+([A-Z0-9\s-]+(?:FLARE|DRAIN|HEADER|UNIT|SYSTEM|ATMOSPHERE)?)\b', val, re.I)
                     if m_to:
                         dest = m_to.group(1).strip()
-                        if len(dest) >= 3 and dest.upper() not in ("BE", "THE", "SUCTION"):
-                            to_node = f"{dest} (off-page)"
-                            break
+                        if len(dest) >= 3 and dest.upper() not in ("BE", "THE", "SUCTION", "A", "AN"):
+                            attrs = t.get("attributes") or {}
+                            t_y = float(attrs.get("pos_y", -1)) if attrs.get("pos_y") else -1.0
+                            t_x = float(attrs.get("pos_x", -1)) if attrs.get("pos_x") else -1.0
+                            if line_y >= 0 and line_x >= 0 and t_y >= 0 and t_x >= 0:
+                                dist = ((line_y - t_y) ** 2 + (line_x - t_x) ** 2) ** 0.5
+                                if dist < best_to_dist:
+                                    best_to_dist = dist
+                                    best_to_dest = dest
+                if best_to_dest:
+                    to_node = f"{best_to_dest} (off-page)"
 
             if not from_node:
+                best_from_src = None
+                best_from_dist = 0.15
                 for t in texts:
                     val = t.get("value") or ""
                     m_from = re.search(r'\bFROM\s+([A-Z0-9\s-]+(?:FLARE|DRAIN|HEADER|UNIT|SYSTEM|VESSEL)?)\b', val, re.I)
                     if m_from:
                         src_callout = m_from.group(1).strip()
-                        if len(src_callout) >= 3:
-                            from_node = f"{src_callout} (off-page)"
-                            break
+                        if len(src_callout) >= 3 and src_callout.upper() not in ("BE", "THE", "SUCTION", "A", "AN"):
+                            attrs = t.get("attributes") or {}
+                            t_y = float(attrs.get("pos_y", -1)) if attrs.get("pos_y") else -1.0
+                            t_x = float(attrs.get("pos_x", -1)) if attrs.get("pos_x") else -1.0
+                            if line_y >= 0 and line_x >= 0 and t_y >= 0 and t_x >= 0:
+                                dist = ((line_y - t_y) ** 2 + (line_x - t_x) ** 2) ** 0.5
+                                if dist < best_from_dist:
+                                    best_from_dist = dist
+                                    best_from_src = src_callout
+                if best_from_src:
+                    from_node = f"{best_from_src} (off-page)"
 
             compiled.append(LineItem(
                 tag=tag,
