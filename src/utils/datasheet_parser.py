@@ -6,6 +6,7 @@ from OCR items using proximity-based key-value block matching.
 """
 from __future__ import annotations
 
+import os
 import re
 import logging
 from typing import Dict, Any, List, Optional
