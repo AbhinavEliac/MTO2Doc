@@ -98,3 +98,32 @@ class TestTagCanonicalization:
         assert len(inst_tags) == 2, (
             f"Expected 2 distinct INSTRUMENT_TAGs, got {len(inst_tags)}"
         )
+
+    def test_relationship_ck921_canonicalized_and_self_loop_dropped(self):
+        """
+        Test that CompilerAgent resolves bare tag CK-921 to master tag 26-CK-921
+        and drops self-loop edges (CK-921 -> 26-CK-921).
+        """
+        from src.agents.compiler import CompilerAgent
+        from src.models import EquipmentItem, UniversalEngineeringGraph
+
+        compiler = CompilerAgent()
+        graph = UniversalEngineeringGraph(drawing_type="PID", discipline="Piping")
+        graph.equipment = [
+            EquipmentItem(tag="26-CK-921", type="Check Valve", name="Check Valve", aliases=["CK-921"])
+        ]
+
+        raw_relations = [
+            {"source_tag": "CK-921", "target_tag": "26-CK-921", "rel_type": "connects_to"},
+            {"source_tag": "LP FLARE", "target_tag": "CK-921", "rel_type": "feeds"},
+        ]
+
+        tag_alias_map = {"26-CK-921": "26-CK-921", "CK-921": "26-CK-921", "LP FLARE": "LP FLARE"}
+        compiled_rels = compiler._compile_relationships(raw_relations, tag_alias_map)
+
+        # 1. Self-loop edge CK-921 -> 26-CK-921 must be dropped
+        # 2. LP FLARE -> CK-921 must be resolved to target "26-CK-921"
+        assert len(compiled_rels) == 1
+        assert compiled_rels[0].source == "LP FLARE"
+        assert compiled_rels[0].target == "26-CK-921"
+

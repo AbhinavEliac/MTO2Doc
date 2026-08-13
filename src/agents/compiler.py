@@ -109,12 +109,6 @@ class CompilerAgent(BaseAgent):
         else:
             logger.info("Provenance: no OCR token set in state; skipping contamination filter.")
 
-        # Always compile relationships (cross-type)
-        graph.relationships = self._compile_relationships(all_relations)
-
-        # Always compile annotations (notes, elevations, ratings)
-        graph.annotations = self._compile_annotations(text_elements)
-
         # Universal compilation across all detected entity types
         graph.equipment = self._compile_equipment(text_elements, symbols)
         graph.lines = self._compile_lines(text_elements, geometry, all_relations)
@@ -126,6 +120,39 @@ class CompilerAgent(BaseAgent):
         graph.cables = self._compile_cables(text_elements, symbols, relations)
         graph.earthing_components = self._compile_earthing(text_elements, symbols)
         graph.generic_components = self._compile_generic(text_elements, symbols)
+
+        # Always compile annotations (notes, elevations, ratings)
+        graph.annotations = self._compile_annotations(text_elements)
+
+        # Defect 2 Fix: Build master tag alias lookup map across all compiled entities
+        from src.utils.tag_classifier import canonicalize_tag
+        tag_alias_map: Dict[str, str] = {}
+
+        def _register(tag_str: str, aliases: Optional[List[str]] = None):
+            if not tag_str:
+                return
+            t_up = tag_str.upper()
+            c_up = canonicalize_tag(tag_str)
+            tag_alias_map[t_up] = tag_str
+            tag_alias_map[c_up] = tag_str
+            if aliases:
+                for a in aliases:
+                    tag_alias_map[a.upper()] = tag_str
+                    tag_alias_map[canonicalize_tag(a)] = tag_str
+
+        for e in graph.equipment:
+            _register(e.tag, getattr(e, 'aliases', None))
+        for inst in graph.instruments:
+            _register(inst.tag, getattr(inst, 'aliases', None))
+        for v in graph.valves:
+            _register(v.tag, getattr(v, 'aliases', None))
+        for l in graph.lines:
+            _register(l.tag, getattr(l, 'aliases', None))
+        for psv in graph.safety_relief_valves:
+            _register(psv.tag, getattr(psv, 'aliases', None))
+
+        # Always compile relationships (cross-type) using master tag alias lookup
+        graph.relationships = self._compile_relationships(all_relations, tag_alias_map)
 
         total = graph.total_items
         logger.info(
@@ -284,6 +311,27 @@ class CompilerAgent(BaseAgent):
                         to_node = ttag
                     elif ttag == tag:
                         from_node = stag
+
+            # Item 8 Fix: Parse off-page destination callouts (TO LP FLARE, TO CLOSED DRAIN)
+            if not to_node:
+                for t in texts:
+                    val = t.get("value") or ""
+                    m_to = re.search(r'\bTO\s+([A-Z0-9\s-]+(?:FLARE|DRAIN|HEADER|UNIT|SYSTEM|ATMOSPHERE)?)\b', val, re.I)
+                    if m_to:
+                        dest = m_to.group(1).strip()
+                        if len(dest) >= 3 and dest.upper() not in ("BE", "THE", "SUCTION"):
+                            to_node = f"{dest} (off-page)"
+                            break
+
+            if not from_node:
+                for t in texts:
+                    val = t.get("value") or ""
+                    m_from = re.search(r'\bFROM\s+([A-Z0-9\s-]+(?:FLARE|DRAIN|HEADER|UNIT|SYSTEM|VESSEL)?)\b', val, re.I)
+                    if m_from:
+                        src_callout = m_from.group(1).strip()
+                        if len(src_callout) >= 3:
+                            from_node = f"{src_callout} (off-page)"
+                            break
 
             compiled.append(LineItem(
                 tag=tag,
@@ -799,22 +847,33 @@ class CompilerAgent(BaseAgent):
             ))
         return compiled
 
-    def _compile_relationships(self, relations: List[Dict]) -> List[Relationship]:
-        """Compile relationships with deduplication by canonical source/target/type triple."""
+    def _compile_relationships(
+        self, relations: List[Dict], tag_alias_map: Optional[Dict[str, str]] = None
+    ) -> List[Relationship]:
+        """Compile relationships with canonical tag mapping and self-loop edge filtering."""
         from src.utils.tag_classifier import canonicalize_tag
+        tag_alias_map = tag_alias_map or {}
         seen_edges: set = set()
         result: List[Relationship] = []
 
         for r in relations:
-            src = r.get("source_tag") or r.get("source") or ""
-            tgt = r.get("target_tag") or r.get("target") or ""
+            raw_src = r.get("source_tag") or r.get("source") or ""
+            raw_tgt = r.get("target_tag") or r.get("target") or ""
             rtype = (r.get("rel_type") or r.get("type") or "").lower()
             flag = r.get("flag_reason")
 
-            if not src or not tgt:
+            if not raw_src or not raw_tgt:
                 continue
 
-            # ── Defect 2 Fix: deduplicate edges by canonical source+target+type ──
+            # Defect 2 Fix: Resolve source & target to master canonical tags
+            src = tag_alias_map.get(raw_src.upper()) or tag_alias_map.get(canonicalize_tag(raw_src)) or raw_src
+            tgt = tag_alias_map.get(raw_tgt.upper()) or tag_alias_map.get(canonicalize_tag(raw_tgt)) or raw_tgt
+
+            # Drop self-loop edges (e.g. 26-CK-921 -> 26-CK-921)
+            if src == tgt or canonicalize_tag(src) == canonicalize_tag(tgt):
+                logger.debug(f"Relationships: dropped self-loop edge '{src}' -> '{tgt}'")
+                continue
+
             canon_edge = (canonicalize_tag(src), canonicalize_tag(tgt), rtype)
             if canon_edge in seen_edges:
                 continue

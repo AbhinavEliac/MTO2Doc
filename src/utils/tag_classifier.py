@@ -183,9 +183,9 @@ _VALVE_SEARCH = re.compile(
     re.IGNORECASE
 )
 
-# Line tags: 8"-PV-26-9035-FC11S-08, 1/2"-PV-26-9035-FC11S, 3"-VA-26-9121-AC21-00, PV-26-9035-FC11S-08
+# Line tags: 8"-PV-26-9035-FC11S-08, 12mm-PV-26-9116-FD70X-00, 3"-VA-26-9121-AC21-00, PV-26-9035-FC11S-08
 _LINE_SEARCH = re.compile(
-    r'((?:\d+(?:[/\.]\d+)?["\']?\s*[-–]?\s*)?[A-Z]{1,4}\s*[-–]\s*(?:\d{2,4}\s*[-–]\s*)?\d{3,5}'
+    r'((?:\d+(?:[/\.]\d+)?(?:["\']|mm|DN)?\s*[-–]?\s*)?[A-Z]{1,4}\s*[-–]\s*(?:\d{2,4}\s*[-–]\s*)?\d{3,5}'
     r'\s*[-–]\s*[A-Z0-9]{2,8}(?:\s*[-–]\s*[A-Z0-9]{1,8})?)',
     re.IGNORECASE
 )
@@ -345,6 +345,44 @@ def _is_setpoint_context(full_text: str, match_start: int, match_end: int) -> bo
     return bool(_SETPOINT_CONTEXT_RE.search(window_text))
 
 
+def _is_setpoint_context_spatial(item_idx: int, all_items: List[Dict[str, Any]]) -> bool:
+    """
+    Check whether the item at item_idx or any nearby OCR item (within Y-gap 0.05 and X-gap 0.20)
+    contains setpoint/alarm keywords.
+    """
+    target = all_items[item_idx]
+    target_text = (target.get('text') or target.get('value') or '').strip()
+
+    if _SETPOINT_CONTEXT_RE.search(target_text):
+        return True
+
+    t_y = float(target.get('center_y') or (target.get('attributes') or {}).get('pos_y') or -1)
+    t_x = float(target.get('center_x') or (target.get('attributes') or {}).get('pos_x') or -1)
+
+    if t_y < 0 or t_x < 0:
+        return False
+
+    for i, other in enumerate(all_items):
+        if i == item_idx:
+            continue
+        o_text = (other.get('text') or other.get('value') or '').strip()
+        if not o_text:
+            continue
+        o_y = float(other.get('center_y') or (other.get('attributes') or {}).get('pos_y') or -1)
+        o_x = float(other.get('center_x') or (other.get('attributes') or {}).get('pos_x') or -1)
+        if o_y < 0 or o_x < 0:
+            continue
+
+        dy = abs(t_y - o_y)
+        dx = abs(t_x - o_x)
+
+        if dy <= 0.05 and dx <= 0.20:
+            if _SETPOINT_CONTEXT_RE.search(o_text):
+                return True
+
+    return False
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Defect 4 Fix: Line tag grammar enforcement helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -384,7 +422,7 @@ def _validate_line_tag_size(tag: str) -> tuple:
     size_clean = p0.replace('"', '').replace("'", '').replace(' ', '').lower()
     # Reject corrupt large sizes (e.g. 262", 1000")
     if _CORRUPT_SIZE_RE.match(p0) or (has_inch and size_clean.isdigit() and int(size_clean) > 60):
-        return False, f'invalid_pipe_size_corrupt_merge({p0})'
+        return False, f'size_out_of_range({p0})'
     size_with_mm = size_clean + 'mm' if size_clean.isdigit() else size_clean
     if size_clean in _VALID_INCH_SIZES or size_with_mm in _VALID_MM_SIZES:
         return True, None
@@ -399,12 +437,12 @@ def _validate_line_tag_size(tag: str) -> tuple:
         try:
             n = int(size_clean)
             if has_inch and n > 60:
-                return False, f'invalid_pipe_size_corrupt_merge({p0})'
+                return False, f'size_out_of_range({p0})'
             if 1 <= n <= 600:  # plausible DN size
                 return True, 'unverified_size_token'
         except ValueError:
             pass
-        return False, f'invalid_pipe_size_out_of_range({p0})'
+        return False, f'size_out_of_range({p0})'
     return True, None
 
 
@@ -446,8 +484,8 @@ def classify_paddle_results(
 
     Fixes applied:
       Defect 2: Post-deduplication pass — merges short/prefixed tag variants by canonical key.
-      Defect 3: Setpoint negative-context filter — prevents PI-150, AT-225 hallucinations.
-      Defect 4: Line-tag grammar validation — validates pipe-size tokens and strips NOTE refs.
+      Defect 3: Spatial setpoint negative-context filter — demotes PI-150, AT-225 setpoint numbers.
+      Defect 4: Line-tag grammar validation & size whitelist rejection (262" rejected, 12mm retained).
 
     Retains ALL non-tag text lines as NOTE annotations so 100% of readable text is preserved.
     Adds 'confidence' and 'flag_reason' to every returned item.
@@ -455,7 +493,7 @@ def classify_paddle_results(
     found: Dict[str, Dict] = {}  # tag → item (deduplicated by EXACT tag string)
     dt = (drawing_type or 'PID').upper()
 
-    for item in items:
+    for item_idx, item in enumerate(items):
         text = item.get('text', '').strip()
         conf = float(item.get('confidence', 0))
 
@@ -490,10 +528,16 @@ def classify_paddle_results(
             tag_conf = conf
             size_valid, size_flag = _validate_line_tag_size(tag)
             if not size_valid:
-                # Invalid size — flag but emit for human review
-                flag_reason = size_flag
-                tag_conf = min(conf, 0.5)
-            elif size_flag:
+                # Defect 4 Fix: Reject corrupt line size from LINE_TAG list emission
+                demoted_item = _make_item(
+                    tag, 'NOTE', 0.25, item,
+                    flag_reason=size_flag or 'size_out_of_range'
+                )
+                found[tag] = demoted_item
+                item_added = True
+                continue
+
+            if size_flag:
                 flag_reason = size_flag
                 tag_conf = min(conf, 0.75)
             if raw_tag_clean != raw_tag.strip():
@@ -518,6 +562,18 @@ def classify_paddle_results(
                 continue
             if full_tag in found and found[full_tag]['classification'] != 'NOTE':
                 continue
+
+            # Defect 3 Fix: Check setpoint context before emitting instrument tags
+            if code in _INSTRUMENT_CODES or (len(seq) >= 4 and code not in _EQUIPMENT_CODES):
+                if _is_setpoint_context_spatial(item_idx, items) or _is_setpoint_context(t, m.start(), m.end()):
+                    found[full_tag] = _make_item(
+                        full_tag, 'NOTE', 0.15, item,
+                        flag_reason='ambiguous_setpoint_vs_tag'
+                    )
+                    item_added = True
+                    logger.debug(f"Setpoint guard: demoted '{full_tag}' to NOTE")
+                    continue
+
             _VALVE_FUNCTION_CODES = {'CB', 'GB', 'BL', 'GT', 'BT', 'GL', 'NV'}
             if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 4:
                 cat = 'VALVE_TAG'
@@ -529,6 +585,7 @@ def classify_paddle_results(
                 cat = 'INSTRUMENT_TAG'
             else:
                 cat = 'EQUIPMENT_TAG'
+
             if full_tag not in found:
                 found[full_tag] = _make_item(full_tag, cat, conf, item)
                 item_added = True
@@ -538,15 +595,18 @@ def classify_paddle_results(
             tag = m.group(1).upper()
             if tag in found:
                 continue
-            if _is_setpoint_context(t, m.start(), m.end()):
+            if _is_setpoint_context_spatial(item_idx, items) or _is_setpoint_context(t, m.start(), m.end()):
                 # Matches setpoint-like context — demote to NOTE with flag
                 found[tag] = _make_item(
-                    tag, 'NOTE', min(conf, 0.25), item,
+                    tag, 'NOTE', 0.15, item,
                     flag_reason='ambiguous_setpoint_vs_tag'
                 )
-                logger.debug(f"Setpoint guard: demoted '{tag}' to NOTE (context: '{t[:60]}...')")
+                logger.debug(f"Setpoint guard: demoted bare '{tag}' to NOTE")
             else:
-                found[tag] = _make_item(tag, 'INSTRUMENT_TAG', conf, item)
+                found[tag] = _make_item(
+                    tag, 'INSTRUMENT_TAG', min(conf, 0.60), item,
+                    flag_reason='unverified_bare_instrument_tag'
+                )
             item_added = True
 
         # Valve tags

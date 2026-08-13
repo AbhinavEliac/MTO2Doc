@@ -116,3 +116,13 @@ class TestSetpointFilter:
                         f"Expected confidence <= 0.25 for flagged item '{r['tag']}', "
                         f"got {r.get('confidence')}"
                     )
+
+    def test_spatial_multi_box_setpoint_detection(self):
+        """When PI-150 is in one box and 'SD HH: 150 BARG' is adjacent, PI-150 must be demoted."""
+        from src.utils.tag_classifier import _is_setpoint_context_spatial
+        items = [
+            {"text": "PI-150", "confidence": 0.95, "center_x": 0.50, "center_y": 0.30},
+            {"text": "SD HH: 150 BARG", "confidence": 0.95, "center_x": 0.52, "center_y": 0.32},
+        ]
+        assert _is_setpoint_context_spatial(0, items) is True
+

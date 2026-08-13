@@ -117,3 +117,65 @@ class TestEquipmentDatasheet:
         if "26-KA-901" in result:
             assert "material" in result["26-KA-901"]
             assert "LTCS" in result["26-KA-901"]["material"]
+
+    def test_full_ka902_datasheet_block_parsing(self):
+        """Test complete 26-KA-902 synthetic datasheet block matching QA report."""
+        block = [
+            _make_item("26-KA-902", "EQUIPMENT_TAG", 0.20),
+            _make_item("SERVICE 3RD STAGE HP GAS EXPORT COMPRESSOR", "NOTE", 0.21),
+            _make_item("DUTY kW 1835", "NOTE", 0.22),
+            _make_item("FLOW RATE kg/h 62809", "NOTE", 0.23),
+            _make_item("DISCHARGE / SUCTION OP. PRESS. (MAX) Barg 199 / 108.5", "NOTE", 0.24),
+            _make_item("DISCHARGE / SUCTION DESIGN PRESS. (MAX) Barg FV / 286", "NOTE", 0.25),
+            _make_item("DISCHARGE / SUCTION DESIGN TEMP. °C -46 / 160", "NOTE", 0.26),
+            _make_item("MATERIAL LTCS (1.7218)", "NOTE", 0.27),
+            _make_item("QUANTITY 1x100%", "NOTE", 0.28),
+            _make_item("TYPE VARIABLE SPEED MOTOR DRIVEN CENTRIFUGAL", "NOTE", 0.29),
+            _make_item("VENDOR MAN ENERGY SOLUTIONS", "NOTE", 0.30),
+        ]
+        result = parse_equipment_datasheets(block)
+        assert "26-KA-902" in result
+        fields = result["26-KA-902"]
+        assert "duty" in fields and "1835" in fields["duty"]
+        assert "flow_rate" in fields and "62809" in fields["flow_rate"]
+        assert "design_pressure" in fields and "286" in fields["design_pressure"]
+        assert "design_temperature" in fields and "160" in fields["design_temperature"]
+        assert "material" in fields and "LTCS" in fields["material"]
+        assert "quantity" in fields and "1x100%" in fields["quantity"]
+        assert "type" in fields and "CENTRIFUGAL" in fields["type"]
+        assert "vendor" in fields and "MAN ENERGY SOLUTIONS" in fields["vendor"]
+
+    def test_vendor_scope_marker_rejected(self):
+        """Bare word 'VENDOR' scope marker must NOT populate the Vendor field."""
+        items = [
+            _make_item("26-CX-9021", "EQUIPMENT_TAG", 0.30),
+            _make_item("VENDOR", "NOTE", 0.31),
+        ]
+        result = parse_equipment_datasheets(items)
+        if "26-CX-9021" in result:
+            assert "vendor" not in result["26-CX-9021"]
+
+    def test_parenthetical_note_rejected_from_type(self):
+        """Raw parenthetical note sentences must NOT populate the equipment Type field."""
+        items = [
+            _make_item("26-KZ-902", "EQUIPMENT_TAG", 0.40),
+            _make_item("(MOTOR PURGE SYSTEM ; EX-P TYPE MOTOR)", "NOTE", 0.41),
+        ]
+        result = parse_equipment_datasheets(items)
+        if "26-KZ-902" in result:
+            assert "type" not in result["26-KZ-902"]
+
+    def test_psv_flange_spec_parsing(self):
+        """Test parse_psv_flange_specs for 3"x4" 300# 150# near PSV tag."""
+        from src.utils.datasheet_parser import parse_psv_flange_specs
+        items = [
+            _make_item("26-PSV-9066A", "PSV_TAG", 0.50),
+            _make_item('3"x4" 300# 150#', "NOTE", 0.52),
+        ]
+        result = parse_psv_flange_specs(items)
+        assert "26-PSV-9066A" in result
+        flange = result["26-PSV-9066A"]
+        assert flange["inlet_size"] == '3"'
+        assert flange["outlet_size"] == '4"'
+        assert flange["inlet_spec"] == "300#"
+

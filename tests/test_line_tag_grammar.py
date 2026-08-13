@@ -19,12 +19,20 @@ def _make_ocr_item(text: str, conf: float = 0.95) -> dict:
 class TestLineTagGrammar:
 
     def test_corrupt_size_262_inch_is_flagged(self):
-        """262\"-VA-26-9110-AS20S-00 has an impossible size — must be flagged."""
+        """262\"-VA-26-9110-AS20S-00 has an impossible size — must be flagged invalid."""
         valid, flag_reason = _validate_line_tag_size('262"-VA-26-9110-AS20S-00')
         assert not valid, "Expected invalid=True for 262\" size"
-        assert flag_reason and "corrupt_merge" in flag_reason, (
-            f"Expected 'corrupt_merge' in flag_reason, got: {flag_reason}"
+        assert flag_reason and "size_out_of_range" in flag_reason, (
+            f"Expected 'size_out_of_range' in flag_reason, got: {flag_reason}"
         )
+
+    def test_12mm_size_prefix_preserved(self):
+        """12mm-PV-26-9116-FD70X-00 must retain 12mm size prefix and classify cleanly."""
+        items = [_make_ocr_item('12mm-PV-26-9116-FD70X-00')]
+        result = classify_paddle_results(items, drawing_type="PID")
+        line_tags = [r for r in result if r["classification"] == "LINE_TAG"]
+        assert len(line_tags) == 1
+        assert "12MM" in line_tags[0]["tag"]
 
     def test_valid_sizes_pass_without_flag(self):
         """Standard pipe sizes should pass without any flag_reason."""
@@ -40,27 +48,17 @@ class TestLineTagGrammar:
         items = [_make_ocr_item('3/4"-VA-26-9114-AC21-00NOTE20')]
         result = classify_paddle_results(items, drawing_type="PID")
         line_tags = [r for r in result if r["classification"] == "LINE_TAG"]
-        # The tag should be found and NOTE20 should NOT be in the tag string
         for lt in line_tags:
             assert "NOTE20" not in lt["tag"] and "NOTE" not in lt["tag"].upper().replace("NOTE", ""), (
                 f"NOTE20 should be stripped from line tag, got: '{lt['tag']}'"
             )
-        # Verify that a flag_reason is recorded
-        if line_tags:
-            flag_reasons = [lt.get("flag_reason") for lt in line_tags]
-            # At minimum one should be flagged for note stripping
-            # (acceptable if stripped version is valid)
 
-    def test_corrupt_size_emitted_with_low_confidence(self):
-        """Corrupt-size tags should be emitted (for human review) but with confidence <= 0.5."""
+    def test_corrupt_size_rejected_from_line_tag_emission(self):
+        """Corrupt-size tags (262") must NOT be emitted as LINE_TAG."""
         items = [_make_ocr_item('262"-VA-26-9110-AS20S-00')]
         result = classify_paddle_results(items, drawing_type="PID")
         line_tags = [r for r in result if r["classification"] == "LINE_TAG"]
-        for lt in line_tags:
-            if lt.get("flag_reason") and "corrupt" in lt["flag_reason"]:
-                assert lt.get("confidence", 1.0) <= 0.5, (
-                    f"Expected confidence <= 0.5 for corrupt-size tag, got {lt.get('confidence')}"
-                )
+        assert len(line_tags) == 0, f"Expected 0 LINE_TAGs for corrupt 262\" size, got {line_tags}"
 
     def test_clean_line_tag_has_high_confidence(self):
         """A well-formed line tag should have full confidence and no flag_reason."""
@@ -77,7 +75,7 @@ class TestLineTagGrammar:
     def test_size_validation_out_of_range(self):
         """A numeric size > 600 that is not a standard NPS should be flagged invalid."""
         valid, flag_reason = _validate_line_tag_size('900-VA-26-9110-AS20S-00')
-        # 900 is out of range for standard pipe sizes
         assert flag_reason is not None, (
             "Expected a flag_reason for out-of-range size 900"
         )
+

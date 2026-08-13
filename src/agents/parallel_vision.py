@@ -275,6 +275,7 @@ def _inject_datasheet_attributes(
         from src.utils.datasheet_parser import (
             parse_equipment_datasheets,
             parse_psv_set_pressures,
+            parse_psv_flange_specs,
         )
     except ImportError as e:
         logger.warning(f"datasheet_parser import failed: {e}. Skipping attribute injection.")
@@ -304,11 +305,9 @@ def _inject_datasheet_attributes(
             if len(box) >= 4:
                 try:
                     if isinstance(box[0], (list, tuple)):
-                        # Polygon format: [[x0,y0], [x1,y1], [x2,y2], [x3,y3]]
                         cy = sum(float(pt[1]) for pt in box[:4]) / 4.0
                         cx = sum(float(pt[0]) for pt in box[:4]) / 4.0
                     elif isinstance(box[0], (int, float)):
-                        # Flat box format: [ymin, xmin, ymax, xmax] or [x0, y0, x1, y1]
                         cy = (float(box[0]) + float(box[2])) / 2.0
                         cx = (float(box[1]) + float(box[3])) / 2.0
                 except (ValueError, TypeError, IndexError):
@@ -322,9 +321,10 @@ def _inject_datasheet_attributes(
             'attributes': {},
         })
 
-    # Parse datasheets and PSV set pressures
+    # Parse datasheets, PSV set pressures, and PSV flange specs
     datasheet_map = parse_equipment_datasheets(pos_items)
     psv_sp_map = parse_psv_set_pressures(pos_items)
+    psv_flange_map = parse_psv_flange_specs(pos_items)
 
     # Inject into structured results
     injected_count = 0
@@ -341,11 +341,16 @@ def _inject_datasheet_attributes(
                     injected_count += 1
             item['attributes'] = attrs
 
-        elif cls == 'PSV_TAG' and tag in psv_sp_map:
+        elif cls == 'PSV_TAG':
             attrs = dict(item.get('attributes') or {})
-            if not attrs.get('set_pressure'):
+            if tag in psv_sp_map and not attrs.get('set_pressure'):
                 attrs['set_pressure'] = psv_sp_map[tag]
                 injected_count += 1
+            if tag in psv_flange_map:
+                for k, v in psv_flange_map[tag].items():
+                    if k not in attrs or not attrs[k]:
+                        attrs[k] = v
+                        injected_count += 1
             item['attributes'] = attrs
 
     if injected_count:

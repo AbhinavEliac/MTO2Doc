@@ -53,6 +53,11 @@ class OutputGeneratorAgent(BaseAgent):
         self._generate_sppid_csv(graph, sppid_path)
         deliverables_paths["sppid_csv"] = sppid_path
 
+        # 6. Generate Standalone Relationships CSV (source, target, type, confidence, attributes, flag_reason)
+        rel_csv_path = os.path.join(output_dir, "relationships.csv")
+        self._generate_relationships_csv(graph, rel_csv_path)
+        deliverables_paths["relationships_csv"] = rel_csv_path
+
         logger.info(f"Successfully generated all deliverables inside: '{output_dir}'")
         
         # Cleanup uploaded file from Google GenAI File API to free up resources
@@ -634,4 +639,21 @@ class OutputGeneratorAgent(BaseAgent):
 
         df = pd.DataFrame(rows)
         df.to_csv(path, index=False, header=False)
+
+    def _generate_relationships_csv(self, graph, path: str):
+        """Generates standalone relationships.csv with source, target, type, confidence, attributes, flag_reason."""
+        import json
+        rows = []
+        for rel in getattr(graph, 'relationships', []):
+            rows.append({
+                "source": getattr(rel, 'source_tag', getattr(rel, 'source', '')),
+                "target": getattr(rel, 'target_tag', getattr(rel, 'target', '')),
+                "type": str(getattr(rel, 'rel_type', getattr(rel, 'type', ''))).lower(),
+                "confidence": getattr(rel, 'confidence', 1.0),
+                "attributes": json.dumps(getattr(rel, 'attributes', {}) or {}),
+                "flag_reason": getattr(rel, 'flag_reason', None) or "",
+            })
+        df = pd.DataFrame(rows)
+        df.to_csv(path, index=False)
+
 
