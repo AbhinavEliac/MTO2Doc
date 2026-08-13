@@ -261,6 +261,7 @@ class RawPipelineList(BaseModel):
 def _inject_datasheet_attributes(
     structured: List[Dict[str, Any]],
     ocr_items: List[Dict[str, Any]],
+    pdf_path: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Defect 5 Fix: After Layer 2 classification, scan OCR items for equipment
@@ -334,7 +335,7 @@ def _inject_datasheet_attributes(
         })
 
     # Parse datasheets, PSV set pressures, and PSV flange specs
-    datasheet_map = parse_equipment_datasheets(pos_items)
+    datasheet_map = parse_equipment_datasheets(pos_items, pdf_path=pdf_path)
     psv_sp_map = parse_psv_set_pressures(pos_items)
     psv_flange_map = parse_psv_flange_specs(pos_items)
 
@@ -519,7 +520,8 @@ class TextRecognitionAgent(BaseAgent):
             logger.info(f"Layer 2: Rule-based classifier produced {len(structured)} structured items.")
 
             # ── Defect 5 Fix: inject equipment datasheet fields and PSV set pressures ──
-            structured = _inject_datasheet_attributes(structured, ocr_items)
+            pdf_path = raw_documents[0] if (raw_documents and str(raw_documents[0]).lower().endswith('.pdf')) else None
+            structured = _inject_datasheet_attributes(structured, ocr_items, pdf_path=pdf_path)
 
             # ── Defect 1 Fix: build OCR token set for provenance filter in compiler ──
             from src.utils.provenance import build_ocr_token_set

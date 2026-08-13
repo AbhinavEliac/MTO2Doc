@@ -164,15 +164,116 @@ def _get_float_y(item: Dict[str, Any]) -> float:
         return -1.0
 
 
+def _extract_vendor_value(text: str) -> Optional[str]:
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    if len(lines) >= 2 and "VENDOR" in lines[0].upper():
+        val = lines[1]
+    else:
+        val = re.sub(r'^\s*(?:VENDOR|MANUFACTURER|SUPPLIER|MFR)\s*[:=]?\s*', '', text, flags=re.I).strip()
+    
+    if not val or val.upper() in ("VENDOR", "VENDOR SCOPE", "*", "YARD", "OFF-SKID"):
+        return None
+    if val.startswith("(") and val.endswith(")"):
+        return None
+    if any(w in val.upper() for w in ["SCOPE", "SUPPLY", "NOT IN", "REFER", "DRAWING", "SPECIFICATION", "DOC"]):
+        return None
+    cap_words = re.findall(r'\b[A-Z0-9-]{2,}\b', val)
+    known_vendors = ("MAN", "ENERGY", "SOLUTIONS", "GE", "SIEMENS", "ELLIOTT", "DRESSER", "FLOWSERVE", "SULZER", "ABB", "BAKER", "HUGHES", "SOLAR", "TURBINES")
+    if len(cap_words) >= 2 or any(kv in val.upper() for kv in known_vendors):
+        return val
+    return None
+
+
 def parse_equipment_datasheets(
     ocr_items: List[Dict[str, Any]],
+    pdf_path: Optional[str] = None,
 ) -> Dict[str, Dict[str, str]]:
+    results: Dict[str, Dict[str, str]] = {}
+
+    # 1. Primary pass: If PDF path available, use native PyMuPDF vertical table block parser
+    if pdf_path and os.path.exists(pdf_path):
+        try:
+            import fitz
+            doc = fitz.open(pdf_path)
+            for page in doc:
+                blocks = page.get_text("blocks")
+                text_blocks = []
+                for b in blocks:
+                    txt = b[4].strip()
+                    if txt:
+                        text_blocks.append({'x0': b[0], 'y0': b[1], 'x1': b[2], 'y1': b[3], 'text': txt})
+
+                for i, b in enumerate(text_blocks):
+                    txt = b['text']
+                    if "TAG NUMBER" in txt.upper():
+                        lines = [l.strip() for l in txt.split('\n') if l.strip()]
+                        equip_tag = None
+                        for l in lines:
+                            m = re.search(r'\b\d{2,3}-[A-Z]{2,3}-\d{3,4}[A-Z0-9]*\b', l)
+                            if m:
+                                equip_tag = m.group(0).upper()
+                                break
+
+                        if equip_tag:
+                            x_anchor = b['x0']
+                            y_anchor = b['y0']
+
+                            col_blocks = [
+                                nb for nb in text_blocks
+                                if abs(nb['x0'] - x_anchor) <= 80 and y_anchor - 5 <= nb['y0'] <= y_anchor + 300
+                            ]
+                            col_blocks.sort(key=lambda item: item['y0'])
+
+                            attrs = {}
+                            for nb in col_blocks:
+                                ntxt = nb['text']
+                                nlines = [l.strip() for l in ntxt.split('\n') if l.strip()]
+                                if len(nlines) >= 2:
+                                    lbl_line = nlines[0].upper()
+                                    val_line = " ".join(nlines[1:])
+                                else:
+                                    lbl_line = nlines[0].upper()
+                                    val_line = ""
+
+                                if "DUTY" in lbl_line:
+                                    m_v = re.search(r'[\d,.]+', val_line)
+                                    if m_v:
+                                        attrs['duty'] = f"{m_v.group(0)} kW"
+                                elif "FLOW RATE" in lbl_line:
+                                    m_v = re.search(r'[\d,.]+', val_line)
+                                    if m_v:
+                                        attrs['flow_rate'] = f"{m_v.group(0)} kg/h"
+                                elif "DESIGN PRESS" in lbl_line:
+                                    clean_v = re.sub(r'\s*NOTE.*', '', val_line, flags=re.I).strip()
+                                    if "BARG" not in clean_v.upper():
+                                        attrs['design_pressure'] = f"{clean_v} Barg"
+                                    else:
+                                        attrs['design_pressure'] = clean_v
+                                elif "DESIGN TEMP" in lbl_line:
+                                    clean_v = re.sub(r'\s*NOTE.*', '', val_line, flags=re.I).strip()
+                                    if "°C" not in clean_v and "C" not in clean_v.upper():
+                                        attrs['design_temperature'] = f"{clean_v} °C"
+                                    else:
+                                        attrs['design_temperature'] = clean_v
+                                elif "MATERIAL" in lbl_line:
+                                    attrs['material'] = val_line.strip()
+                                elif "QUANTITY" in lbl_line:
+                                    attrs['quantity'] = val_line.strip()
+                                elif "VENDOR" in lbl_line:
+                                    v_val = _extract_vendor_value(ntxt)
+                                    if v_val:
+                                        attrs['vendor'] = v_val
+
+                            if attrs:
+                                results[equip_tag] = attrs
+        except Exception as e:
+            logger.warning(f"PyMuPDF datasheet parsing error: {e}")
+
+    # 2. Secondary pass: OCR token list spatial parsing for non-PDF items or missing tags
     equip_anchors = [
         item for item in ocr_items
         if item.get('classification') == 'EQUIPMENT_TAG'
     ]
-
-    results: Dict[str, Dict[str, str]] = {}
 
     for item in ocr_items:
         text = (item.get('text') or item.get('value') or item.get('tag') or '').strip()
@@ -204,14 +305,13 @@ def parse_equipment_datasheets(
                     best_tag = anchor.get('tag') or anchor.get('value')
 
             if best_tag:
-                if best_tag not in results:
-                    results[best_tag] = {}
-                if field_def['field'] not in results[best_tag]:
-                    results[best_tag][field_def['field']] = value
-                    logger.debug(
-                        f"Datasheet: {best_tag}.{field_def['field']} = '{value}' "
-                        f"(Y-dist={best_dist:.3f})"
-                    )
+                raw_tag = best_tag
+                m_tag = re.search(r'\b\d{2,3}-[A-Z]{2,3}-\d{3,4}[A-Z0-9]*\b', raw_tag)
+                clean_tag = m_tag.group(0).upper() if m_tag else raw_tag.strip()
+                if clean_tag not in results:
+                    results[clean_tag] = {}
+                if field_def['field'] not in results[clean_tag]:
+                    results[clean_tag][field_def['field']] = value
 
     if results:
         total_fields = sum(len(v) for v in results.values())

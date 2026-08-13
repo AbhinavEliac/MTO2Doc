@@ -218,3 +218,47 @@ class TestEquipmentDatasheet:
         assert res_full[0].confidence == 1.0
         assert res_empty[0].confidence == 0.60
 
+    def test_full_ka902_datasheet_block_parsing_fixture(self):
+        """
+        Round 5 Regression Test: Parse exact quoted 26-KA-902 datasheet block fixture and assert:
+        - Duty = '1835 kW'
+        - Flow Rate = '62809 kg/h'
+        - Material = 'LTCS (1.7218)'
+        - Quantity = '1x100%'
+        - Vendor = 'MAN ENERGY SOLUTIONS'
+        - Design Pressure and Design Temp populated with both discharge/suction values retained.
+        """
+        from src.utils.datasheet_parser import parse_equipment_datasheets
+        items = [
+            _make_item("TAG NUMBER\n26-KA-902", "EQUIPMENT_TAG", 0.50),
+            _make_item("DUTY kW\n1835 NOTE 29", "NOTE", 0.51),
+            _make_item("FLOW RATE kg/h\n62809 NOTE 30", "NOTE", 0.52),
+            _make_item("DISCHARGE / SUCTION OP. PRESS. (MAX) Barg\n199 / 108.5", "NOTE", 0.53),
+            _make_item("DISCHARGE / SUCTION DESIGN PRESS. (MAX) Barg\nFV / 286 / FV / 286 NOTE 22", "NOTE", 0.54),
+            _make_item("DISCHARGE / SUCTION DESIGN TEMP. °C\n-46 / 160 / -46 / 160 NOTE 22", "NOTE", 0.55),
+            _make_item("MATERIAL\nLTCS (1.7218)", "NOTE", 0.56),
+            _make_item("QUANTITY\n1x100%", "NOTE", 0.57),
+            _make_item("VENDOR\nMAN ENERGY SOLUTIONS", "NOTE", 0.58),
+        ]
+        res = parse_equipment_datasheets(items)
+        assert "26-KA-902" in res
+        data = res["26-KA-902"]
+        assert data.get("duty") == "1835 kW"
+        assert data.get("flow_rate") == "62809 kg/h"
+        assert data.get("material") == "LTCS (1.7218)"
+        assert data.get("quantity") == "1x100%"
+        assert data.get("vendor") == "MAN ENERGY SOLUTIONS"
+        assert "FV / 286" in data.get("design_pressure", "")
+        assert "-46 / 160" in data.get("design_temperature", "")
+
+    def test_bare_vendor_scope_marker_rejected(self):
+        """
+        Round 5 Regression Test: Standalone VENDOR scope marker without 2+ capitalized proper-noun words
+        must NOT populate Vendor field (remains None/-).
+        """
+        from src.utils.datasheet_parser import parse_equipment_datasheets, _extract_vendor_value
+        assert _extract_vendor_value("VENDOR") is None
+        assert _extract_vendor_value("* VENDOR SCOPE OF SUPPLY.") is None
+        assert _extract_vendor_value("VENDOR: YARD") is None
+        assert _extract_vendor_value("VENDOR\nMAN ENERGY SOLUTIONS") == "MAN ENERGY SOLUTIONS"
+
