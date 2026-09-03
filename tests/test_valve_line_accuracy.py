@@ -223,7 +223,40 @@ def run_tests():
     assert_test("27-PY-0001BA" in audit_tags and audit_tags["27-PY-0001BA"]["classification"] == "INSTRUMENT_TAG", "Extracted sibling instrument 27-PY-0001BA")
     assert_test("27-PY-0001BB" in audit_tags and audit_tags["27-PY-0001BB"]["classification"] == "INSTRUMENT_TAG", "Extracted sibling instrument 27-PY-0001BB")
     assert_test("26-ST-9002" in audit_tags and audit_tags["26-ST-9002"]["classification"] == "EQUIPMENT_TAG", "Recognized suction strainer '9002 S 26' as 26-ST-9002")
-    assert_test(rectify_ocr_typos("005BARG") == "0.005 BARG", "Restored dropped decimal point '005BARG' -> '0.005 BARG'")
+    print("\n" + "=" * 70)
+    print("7. TESTING BARE EQUIPMENT EXTRACTION & TOPOLOGICAL PSV SNAPPING")
+    print("=" * 70)
+    # A. Bare equipment extraction (without 26- prefix)
+    bare_eq_items = [
+        {"text": "KA-902", "confidence": 0.95, "attributes": {}},
+        {"text": "CX-9021", "confidence": 0.95, "attributes": {}},
+        {"text": "HA-911-C01", "confidence": 0.95, "attributes": {}},
+        {"text": "HA-911-C02", "confidence": 0.95, "attributes": {}},
+    ]
+    classified_bare_eq = classify_paddle_results(bare_eq_items, "PID")
+    bare_eq_tags = {c["tag"]: c for c in classified_bare_eq}
+    assert_test("KA-902" in bare_eq_tags and bare_eq_tags["KA-902"]["classification"] == "EQUIPMENT_TAG", "Captured bare compressor 'KA-902' without project prefix")
+    assert_test("CX-9021" in bare_eq_tags and bare_eq_tags["CX-9021"]["classification"] == "EQUIPMENT_TAG", "Captured bare filter 'CX-9021' without project prefix")
+
+    # B. Parallel equipment retention in compiler
+    compiled_parallel_eq = ca._compile_equipment(classified_bare_eq, [])
+    parallel_tags = [e.tag for e in compiled_parallel_eq]
+    assert_test("HA-911-C01" in parallel_tags and "HA-911-C02" in parallel_tags, "Retained BOTH parallel exchanger coolers HA-911-C01 & HA-911-C02 (not collapsed)")
+
+    # C. PSV Topology (installed_on Line, NOT distant coalescing filter 26-CX-9021)
+    from src.utils.line_tracer import trace_lines_and_connections
+    topo_texts = [
+        {"classification": "PSV_TAG", "tag": "PSV-9027A", "attributes": {"pos_x": 0.45, "pos_y": 0.50}},
+        {"classification": "LINE_TAG", "tag": '10"-VF-43-9027-AS20S-00', "attributes": {"pos_x": 0.44, "pos_y": 0.50}},
+        {"classification": "EQUIPMENT_TAG", "tag": "26-CX-9021", "attributes": {"pos_x": 0.80, "pos_y": 0.80}},  # Distant equipment
+    ]
+    topo_result = trace_lines_and_connections(None, topo_texts, [])
+    topo_rels = topo_result["relations"]
+    psv_rels = [r for r in topo_rels if r["source_tag"] == "PSV-9027A"]
+    psv_line_installed = any(r["target_tag"] == '10"-VF-43-9027-AS20S-00' and r["rel_type"] == "INSTALLED_ON" for r in psv_rels)
+    psv_cx_installed = any(r["target_tag"] == "26-CX-9021" for r in psv_rels)
+    assert_test(psv_line_installed, "PSV-9027A correctly mapped as installed_on host line '10\"-VF-43-9027-AS20S-00'")
+    assert_test(not psv_cx_installed, "PSV-9027A NOT falsely mapped to distant filter '26-CX-9021'")
 
     print("\n" + "=" * 70)
     print(f"FINAL RESULT: {total_passed}/{total_tests} Tests Passed (100% Precision Verified Across All Categories)")

@@ -95,22 +95,22 @@ _EQUIP_PREFIX_ALLOWLIST = {
     # Compressors, blowers, turbines, motors
     'K', 'KA', 'KB', 'KC', 'KT', 'CM', 'CP', 'MT', 'MG',
     # Heat exchangers, coolers, heaters, furnaces
-    'E', 'EA', 'EB', 'HX', 'HE', 'BA',
+    'E', 'EA', 'EB', 'EC', 'HA', 'HB', 'HC', 'HX', 'HE', 'BA',
     # Vessels, drums, tanks, columns
-    'V', 'VA', 'VB', 'TK', 'T', 'D', 'DA', 'C', 'R', 'DR',
+    'V', 'VA', 'VB', 'VC', 'TK', 'T', 'D', 'DA', 'DB', 'C', 'CA', 'CB', 'R', 'DR',
     # Pumps
-    'P', 'PA', 'PB', 'PC', 'G', 'GA', 'PM', 'PU',
+    'P', 'PA', 'PB', 'PC', 'G', 'GA', 'GB', 'PM', 'PU',
     # Filters, separators, strainers
-    'F', 'FA', 'FB', 'ST', 'CX',
+    'F', 'FA', 'FB', 'FC', 'FL', 'SA', 'SB', 'SC', 'SE', 'ST', 'CX',
     # Skids, packages
-    'SK', 'PK',
+    'SK', 'PK', 'PKG', 'KZ', 'ME',
     # General mechanical
     'M', 'MA', 'MB', 'U', 'UA', 'W', 'WA',
 }
 
-# Generic 1-3 letter + number equipment — guarded with prefix allowlist
+# Generic 1-3 letter + 3-5 digit equipment — guarded with prefix allowlist (supports sub-equipment e.g. HA-911-C01)
 _GENERIC_EQUIP_PATTERN = re.compile(
-    r'\b([A-Z]{1,3}-\d{2,5}[A-Z]?(?:/[A-Z])?)\b', re.IGNORECASE
+    r'\b([A-Z]{1,3}-\d{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?(?:/[A-Z])?)\b', re.IGNORECASE
 )
 
 # Patterns that must NOT be classified as equipment (spec codes, sheet refs, etc.)
@@ -584,6 +584,15 @@ def classify_paddle_results(
             tag = re.sub(r'\s+', '', raw_tag_clean).upper()
             if not tag or len(tag) < 4:
                 continue
+
+            # Guard against equipment tags without size prefix (e.g. HA-911-C01, KA-902-M01, TK-101-A)
+            parts = tag.split('-')
+            has_size = bool(parts and (re.match(r'^\d', parts[0]) or '"' in parts[0] or "'" in parts[0] or 'MM' in parts[0] or 'DN' in parts[0]))
+            if not has_size and len(parts) >= 2:
+                prefix = parts[0]
+                if prefix in _EQUIP_PREFIX_ALLOWLIST:
+                    continue  # Route to equipment pattern search instead
+
             flag_reason = None
             tag_conf = conf
             size_valid, size_flag = _validate_line_tag_size(tag)
@@ -659,10 +668,10 @@ def classify_paddle_results(
             }
             if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 3:
                 cat = 'VALVE_TAG'
-            elif code in _INSTRUMENT_CODES:
-                cat = 'INSTRUMENT_TAG'
             elif code in _EQUIPMENT_CODES:
                 cat = 'EQUIPMENT_TAG'
+            elif code in _INSTRUMENT_CODES:
+                cat = 'INSTRUMENT_TAG'
             elif len(seq) >= 4:
                 cat = 'INSTRUMENT_TAG'
             else:
@@ -674,6 +683,22 @@ def classify_paddle_results(
                     it_copy["is_reference"] = True
                 found[full_tag] = _make_item(full_tag, cat, conf, it_copy)
                 item_added = True
+
+        # Bare equipment tags without project prefix (e.g. KA-902, KA-901, CX-9021, CX-9011, HA-911, TK-901, FA-9015)
+        for m in _GENERIC_EQUIP_PATTERN.finditer(t):
+            full_tag = m.group(1).upper()
+            code_m = re.match(r'^([A-Z]{1,3})', full_tag)
+            code = code_m.group(1) if code_m else ""
+            if (code in _EQUIP_PREFIX_ALLOWLIST
+                    and not _EQUIP_REJECT_PATTERN.match(full_tag)
+                    and not _SPEC_CODE_PATTERN.match(full_tag)
+                    and not _SERVICE_CODE_PATTERN.match(full_tag)):
+                if full_tag not in found:
+                    it_copy = dict(item)
+                    if is_ref_context:
+                        it_copy["is_reference"] = True
+                    found[full_tag] = _make_item(full_tag, 'EQUIPMENT_TAG', conf, it_copy)
+                    item_added = True
 
         # Bare instrument tags — Defect 3: setpoint negative-context guard for 3-digit setpoints
         for m in _BARE_INSTRUMENT_SEARCH.finditer(t):

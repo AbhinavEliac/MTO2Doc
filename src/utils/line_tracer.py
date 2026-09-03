@@ -217,7 +217,8 @@ def trace_lines_and_connections(
             ix = float(iattrs.get("pos_x", 0.5)) if iattrs.get("pos_x") else 0.5
             iy = float(iattrs.get("pos_y", 0.5)) if iattrs.get("pos_y") else 0.5
 
-            closest_line = _find_closest_tag(ix, iy, line_items, max_dist=0.45)
+            # Snap instrument directly to continuous polyline vector traces
+            closest_line = _find_closest_line_segment(ix, iy, traces, line_items, max_dist=0.08)
             if closest_line:
                 rkey = (itag, closest_line, "MONITORS")
                 if rkey not in existing_rels:
@@ -228,7 +229,8 @@ def trace_lines_and_connections(
                         "rel_type": "MONITORS"
                     })
             else:
-                closest_eq = _find_closest_tag(ix, iy, equipment, max_dist=0.50)
+                # Direct equipment nozzle attachment (tight threshold)
+                closest_eq = _find_closest_tag(ix, iy, equipment, max_dist=0.06)
                 if closest_eq:
                     rkey = (itag, closest_eq, "MONITORS")
                     if rkey not in existing_rels:
@@ -239,7 +241,7 @@ def trace_lines_and_connections(
                             "rel_type": "MONITORS"
                         })
 
-    # C. Map PSVs to Equipment or Lines
+    # C. Map PSVs to Host Piping Lines & Relief Destinations (Eliminates distant equipment false snapping)
     for psv in psvs:
         ptag = psv.get("tag")
         if not ptag:
@@ -248,16 +250,40 @@ def trace_lines_and_connections(
         px = float(pattrs.get("pos_x", 0.5)) if pattrs.get("pos_x") else 0.5
         py = float(pattrs.get("pos_y", 0.5)) if pattrs.get("pos_y") else 0.5
 
-        closest_target = _find_closest_tag(px, py, equipment, max_dist=0.50) or _find_closest_tag(px, py, line_items, max_dist=0.45)
-        if closest_target:
-            rkey = (ptag, closest_target, "INSTALLED_ON")
+        # 1. PSVs are physically installed on Process Piping Lines (prioritize vector line trace)
+        closest_line = _find_closest_line_segment(px, py, traces, line_items, max_dist=0.08)
+        if closest_line:
+            rkey = (ptag, closest_line, "INSTALLED_ON")
             if rkey not in existing_rels:
                 existing_rels.add(rkey)
                 relations.append({
                     "source_tag": ptag,
-                    "target_tag": closest_target,
+                    "target_tag": closest_line,
                     "rel_type": "INSTALLED_ON"
                 })
+        else:
+            # Direct vessel nozzle top mount (tight threshold only)
+            closest_eq = _find_closest_tag(px, py, equipment, max_dist=0.04)
+            if closest_eq:
+                rkey = (ptag, closest_eq, "INSTALLED_ON")
+                if rkey not in existing_rels:
+                    existing_rels.add(rkey)
+                    relations.append({
+                        "source_tag": ptag,
+                        "target_tag": closest_eq,
+                        "rel_type": "INSTALLED_ON"
+                    })
+
+        # 2. Discharge Relief Destination Header (HP Flare Header)
+        relief_dest = pattrs.get("relief_destination") or "HP Flare Header"
+        rkey_dest = (ptag, relief_dest, "RELIEVES_TO")
+        if rkey_dest not in existing_rels:
+            existing_rels.add(rkey_dest)
+            relations.append({
+                "source_tag": ptag,
+                "target_tag": relief_dest,
+                "rel_type": "RELIEVES_TO"
+            })
 
     # D. Map Lines to Equipment Endpoint Nozzles (CONNECTS_TO)
     for litem in line_items:

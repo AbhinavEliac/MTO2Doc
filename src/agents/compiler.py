@@ -194,17 +194,25 @@ class CompilerAgent(BaseAgent):
         compiled = []
         seen_equip: dict = {}  # canonical key → EquipmentItem (deduplication)
         eq_tags = [t for t in texts if t["classification"] == "EQUIPMENT_TAG"]
-
         for eq in eq_tags:
             tag = eq["tag"]
-
-            # Deduplicate by canonical key (strip project prefix AND trailing unit suffix)
             canon_key = re.sub(r'^\d{2,3}-', '', tag.upper())
-            canon_key = re.sub(r'-[A-Z][A-Z0-9]{0,3}$', '', canon_key)
+            base_key = re.sub(r'-[A-Z0-9]{1,4}$', '', canon_key)
 
+            # Check if this exact canonical key or an exact base prefix exists
+            matched_key = None
             if canon_key in seen_equip:
-                if len(tag) > len(seen_equip[canon_key].tag):
-                    seen_equip[canon_key].tag = tag
+                matched_key = canon_key
+            elif base_key in seen_equip and base_key != canon_key:
+                # Merge bare base tag e.g. HA-911 into more specific 26-HA-911-C01
+                matched_key = base_key
+            elif any(k.startswith(canon_key + "-") for k in seen_equip):
+                # An existing specific tag (e.g. 26-HA-911-C01) is already registered for this bare tag (HA-911)
+                continue
+
+            if matched_key:
+                if len(tag) > len(seen_equip[matched_key].tag):
+                    seen_equip[matched_key].tag = tag
                 continue
 
             coords = None
