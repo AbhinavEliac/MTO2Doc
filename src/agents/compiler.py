@@ -29,6 +29,7 @@ from src.models import (
     GenericComponentItem, AnnotationItem, Relationship,
 )
 from src.state import GraphState
+from src.utils.tag_stitcher import safe_float
 
 logger = logging.getLogger(__name__)
 
@@ -320,19 +321,30 @@ class CompilerAgent(BaseAgent):
                         from_node = stag
 
             # Calculate line center position for spatial association
+            from src.utils.tag_stitcher import safe_float
             line_y, line_x = -1.0, -1.0
             if path_coords and len(path_coords) >= 1:
                 try:
-                    line_y = sum(float(pt[1]) for pt in path_coords if len(pt) >= 2) / float(len(path_coords))
-                    line_x = sum(float(pt[0]) for pt in path_coords if len(pt) >= 2) / float(len(path_coords))
+                    pts_to_avg = []
+                    for pt in path_coords:
+                        if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                            if isinstance(pt[0], (list, tuple)):
+                                for sub_pt in pt:
+                                    if isinstance(sub_pt, (list, tuple)) and len(sub_pt) >= 2:
+                                        pts_to_avg.append((safe_float(sub_pt[0]), safe_float(sub_pt[1])))
+                            else:
+                                pts_to_avg.append((safe_float(pt[0]), safe_float(pt[1])))
+                    if pts_to_avg:
+                        line_y = sum(p[0] for p in pts_to_avg) / float(len(pts_to_avg))
+                        line_x = sum(p[1] for p in pts_to_avg) / float(len(pts_to_avg))
                 except (ValueError, TypeError, ZeroDivisionError):
                     line_y, line_x = -1.0, -1.0
             if line_y < 0:
                 for t in texts:
                     if t.get("tag") == tag or t.get("value") == tag:
                         attrs = t.get("attributes") or {}
-                        line_y = float(attrs.get("pos_y", -1)) if attrs.get("pos_y") else -1.0
-                        line_x = float(attrs.get("pos_x", -1)) if attrs.get("pos_x") else -1.0
+                        line_y = safe_float(attrs.get("pos_y"), -1.0)
+                        line_x = safe_float(attrs.get("pos_x"), -1.0)
                         break
 
             # Item 8 Fix: Parse off-page destination callouts (TO LP FLARE, TO CLOSED DRAIN) with SPATIAL PROXIMITY
@@ -671,13 +683,23 @@ class CompilerAgent(BaseAgent):
                 best_line = None
                 best_dist = 0.35
                 for line in lines:
-                    if line.coordinates and len(line.coordinates) >= 2:
+                    if line.coordinates and len(line.coordinates) >= 1:
                         for pt in line.coordinates:
-                            ly, lx = float(pt[0]), float(pt[1])
-                            d = math.hypot(sx - lx, sy - ly)
-                            if d < best_dist:
-                                best_dist = d
-                                best_line = line.tag
+                            if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                                if isinstance(pt[0], (list, tuple)):
+                                    for sub_pt in pt:
+                                        if isinstance(sub_pt, (list, tuple)) and len(sub_pt) >= 2:
+                                            ly, lx = safe_float(sub_pt[0]), safe_float(sub_pt[1])
+                                            d = math.hypot(sx - lx, sy - ly)
+                                            if d < best_dist:
+                                                best_dist = d
+                                                best_line = line.tag
+                                else:
+                                    ly, lx = safe_float(pt[0]), safe_float(pt[1])
+                                    d = math.hypot(sx - lx, sy - ly)
+                                    if d < best_dist:
+                                        best_dist = d
+                                        best_line = line.tag
                 associated_line = best_line
 
             derived_size = None

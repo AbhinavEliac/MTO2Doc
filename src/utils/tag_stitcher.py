@@ -72,25 +72,72 @@ def rectify_ocr_typos(text: str) -> str:
     return cleaned
 
 
+def safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely converts string, number, or nested list/tuple element to float without throwing."""
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, (list, tuple)):
+        if len(val) > 0:
+            return safe_float(val[0], default)
+        return default
+    try:
+        return float(str(val).strip())
+    except (ValueError, TypeError):
+        return default
+
+
 def _get_item_box(item: Dict[str, Any]) -> Tuple[float, float, float, float, float, float]:
     """
     Extracts (cx, cy, w, h, xmin, xmax) from OCR item.
-    Supports normalized [0..1] and pixel coordinates.
+    Supports 4-point polygon [[x0, y0], [x1, y1], [x2, y2], [x3, y3]],
+    flat [ymin, xmin, ymax, xmax] / [x0, y0, x1, y1], normalized and pixel coordinates.
     """
-    box = item.get("box") or item.get("bbox")
     attrs = item.get("attributes") or {}
+    cx_attr = safe_float(attrs.get("pos_x", item.get("center_x")), -1.0)
+    cy_attr = safe_float(attrs.get("pos_y", item.get("center_y")), -1.0)
 
+    # If item has precomputed normalized center coordinates (0.0 .. 1.0), prioritize them
+    if 0.0 <= cx_attr <= 1.0 and 0.0 <= cy_attr <= 1.0:
+        return cx_attr, cy_attr, 0.05, 0.02, max(0.0, cx_attr - 0.025), min(1.0, cx_attr + 0.025)
+
+    box = item.get("box") or item.get("bbox")
     if box and len(box) >= 4:
-        ymin, xmin, ymax, xmax = float(box[0]), float(box[1]), float(box[2]), float(box[3])
-        # If in pixel space (e.g. > 10.0), let it remain comparable
-        cx = (xmin + xmax) / 2.0
-        cy = (ymin + ymax) / 2.0
-        w = abs(xmax - xmin)
-        h = abs(ymax - ymin)
-        return cx, cy, w, h, xmin, xmax
+        # Case A: 4-point polygon list of [x, y] coordinates
+        if isinstance(box[0], (list, tuple)) and len(box[0]) >= 2:
+            xs = [safe_float(pt[0]) for pt in box if isinstance(pt, (list, tuple)) and len(pt) >= 2]
+            ys = [safe_float(pt[1]) for pt in box if isinstance(pt, (list, tuple)) and len(pt) >= 2]
+            if xs and ys:
+                xmin, xmax = min(xs), max(xs)
+                ymin, ymax = min(ys), max(ys)
+                cx = (xmin + xmax) / 2.0
+                cy = (ymin + ymax) / 2.0
+                w = max(0.001, abs(xmax - xmin))
+                h = max(0.001, abs(ymax - ymin))
+                if cx > 1.0 or cy > 1.0:
+                    scale = max(xmax, ymax, 1000.0)
+                    return cx / scale, cy / scale, w / scale, h / scale, xmin / scale, xmax / scale
+                return cx, cy, w, h, xmin, xmax
+        # Case B: Flat bounding box [ymin, xmin, ymax, xmax] or [x0, y0, x1, y1]
+        elif not isinstance(box[0], (list, tuple)):
+            v0 = safe_float(box[0])
+            v1 = safe_float(box[1])
+            v2 = safe_float(box[2])
+            v3 = safe_float(box[3])
+            ymin, ymax = min(v0, v2), max(v0, v2)
+            xmin, xmax = min(v1, v3), max(v1, v3)
+            cx = (xmin + xmax) / 2.0
+            cy = (ymin + ymax) / 2.0
+            w = max(0.001, abs(xmax - xmin))
+            h = max(0.001, abs(ymax - ymin))
+            if cx > 1.0 or cy > 1.0:
+                scale = max(xmax, ymax, 1000.0)
+                return cx / scale, cy / scale, w / scale, h / scale, xmin / scale, xmax / scale
+            return cx, cy, w, h, xmin, xmax
 
-    cx = float(attrs.get("pos_x", item.get("center_x", 0.5)))
-    cy = float(attrs.get("pos_y", item.get("center_y", 0.5)))
+    cx = cx_attr if cx_attr >= 0 else 0.5
+    cy = cy_attr if cy_attr >= 0 else 0.5
     return cx, cy, 0.05, 0.02, cx - 0.025, cx + 0.025
 
 

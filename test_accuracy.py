@@ -33,7 +33,8 @@ fail_count = 0
 
 def check(label, tag, expected_cls):
     global pass_count, fail_count
-    r = by_tag.get(tag.upper())
+    from src.utils.tag_stitcher import rectify_ocr_typos
+    r = by_tag.get(tag.upper()) or by_tag.get(rectify_ocr_typos(tag).upper())
     cls = r['classification'] if r else 'NOT_FOUND'
     if expected_cls == 'NOTE_OR_LINE':
         ok = cls in ('NOTE', 'LINE_TAG')

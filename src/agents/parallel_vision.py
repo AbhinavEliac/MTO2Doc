@@ -807,9 +807,10 @@ class SymbolRecognitionAgent(BaseAgent):
                 sym_type = "EARTH_PIT"
 
             if sym_type:
+                from src.utils.tag_stitcher import safe_float
                 attrs = t.get("attributes") or {}
-                px = float(attrs.get("pos_x", 0.5)) if attrs.get("pos_x") else 0.5
-                py = float(attrs.get("pos_y", 0.5)) if attrs.get("pos_y") else 0.5
+                px = safe_float(attrs.get("pos_x"), 0.5)
+                py = safe_float(attrs.get("pos_y"), 0.5)
                 symbols.append({
                     "symbol_type": sym_type,
                     "inferred_tag": tag,
@@ -821,6 +822,7 @@ class SymbolRecognitionAgent(BaseAgent):
 
         # ── Pre-compilation Symbol Validator & Untagged Valve Harvester ────────
         # For any detected valve symbol lacking an inferred_tag, search nearby text or assign auto-tag
+        from src.utils.tag_stitcher import safe_float
         valve_type_prefixes = {
             "GATE_VALVE": "GV",
             "CHECK_VALVE": "CB",
@@ -838,8 +840,8 @@ class SymbolRecognitionAgent(BaseAgent):
             stype = sym.get("symbol_type", "").upper()
             if any(k in stype for k in valve_type_prefixes.keys()) or "VALVE" in stype:
                 if not sym.get("inferred_tag"):
-                    sy = (sym.get("ymin", 0.5) + sym.get("ymax", 0.5)) / 2.0
-                    sx = (sym.get("xmin", 0.5) + sym.get("xmax", 0.5)) / 2.0
+                    sy = (safe_float(sym.get("ymin"), 0.5) + safe_float(sym.get("ymax"), 0.5)) / 2.0
+                    sx = (safe_float(sym.get("xmin"), 0.5) + safe_float(sym.get("xmax"), 0.5)) / 2.0
 
                     # Look for nearby VALVE_TAG in text_elements
                     best_vtag = None
@@ -847,8 +849,8 @@ class SymbolRecognitionAgent(BaseAgent):
                     for t in texts:
                         if t.get("classification") == "VALVE_TAG":
                             tattrs = t.get("attributes") or {}
-                            tx = float(tattrs.get("pos_x", 0.5)) if tattrs.get("pos_x") else 0.5
-                            ty = float(tattrs.get("pos_y", 0.5)) if tattrs.get("pos_y") else 0.5
+                            tx = safe_float(tattrs.get("pos_x"), 0.5)
+                            ty = safe_float(tattrs.get("pos_y"), 0.5)
                             dist = math.hypot(sx - tx, sy - ty)
                             if dist < best_vdist:
                                 best_vdist = dist

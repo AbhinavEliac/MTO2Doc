@@ -62,19 +62,20 @@ def run_tests():
     assert_test(any("HV-101" in t for t in valve_texts), "Stitched split valve tag HV- + 101 -> HV-101", f"Got: {valve_texts}")
 
     print("\n" + "=" * 70)
-    print("3. TESTING TAG CLASSIFICATION FOR STITCHED & DENSE TAGS")
+    print("3. TESTING TAG CLASSIFICATION FOR STITCHED & DENSE TAGS (WITH POLYGON BBOXES)")
     print("=" * 70)
+    # Testing 4-point polygon bboxes from PyMuPDF/PaddleOCR: [[x0,y0], [x1,y0], [x1,y1], [x0,y1]]
     raw_ocr_items = [
-        {"text": '8"', "confidence": 0.95, "center_x": 0.10, "center_y": 0.30, "attributes": {"pos_x": 0.10, "pos_y": 0.30}},
-        {"text": "PV-26-9035", "confidence": 0.95, "center_x": 0.15, "center_y": 0.30, "attributes": {"pos_x": 0.15, "pos_y": 0.30}},
-        {"text": "FC11S-08", "confidence": 0.95, "center_x": 0.22, "center_y": 0.30, "attributes": {"pos_x": 0.22, "pos_y": 0.30}},
-        {"text": "26GB9178", "confidence": 0.95, "center_x": 0.18, "center_y": 0.30, "attributes": {"pos_x": 0.18, "pos_y": 0.30}},
-        {"text": "26CB9131", "confidence": 0.95, "center_x": 0.40, "center_y": 0.50, "attributes": {"pos_x": 0.40, "pos_y": 0.50}},
+        {"text": '8"', "confidence": 0.99, "bbox": [[100, 200], [140, 200], [140, 220], [100, 220]], "center_x": 0.10, "center_y": 0.30},
+        {"text": "PV-26-9035", "confidence": 0.99, "bbox": [[150, 200], [250, 200], [250, 220], [150, 220]], "center_x": 0.15, "center_y": 0.30},
+        {"text": "FC11S-08", "confidence": 0.99, "bbox": [[260, 200], [350, 200], [350, 220], [260, 220]], "center_x": 0.22, "center_y": 0.30},
+        {"text": "26GB9178", "confidence": 0.99, "bbox": [[180, 300], [260, 300], [260, 320], [180, 320]], "center_x": 0.18, "center_y": 0.30},
+        {"text": "26CB9131", "confidence": 0.99, "bbox": [[400, 500], [480, 500], [480, 520], [400, 520]], "center_x": 0.40, "center_y": 0.50},
     ]
     classified = classify_paddle_results(raw_ocr_items, "PID")
     cls_by_tag = {c["tag"]: c["classification"] for c in classified}
     
-    assert_test("8\"-PV-26-9035-FC11S-08" in cls_by_tag and cls_by_tag["8\"-PV-26-9035-FC11S-08"] == "LINE_TAG", "Stitched line classified as LINE_TAG")
+    assert_test("8\"-PV-26-9035-FC11S-08" in cls_by_tag and cls_by_tag["8\"-PV-26-9035-FC11S-08"] == "LINE_TAG", "Stitched line with polygon bboxes classified as LINE_TAG")
     assert_test("26GB9178" in cls_by_tag and cls_by_tag["26GB9178"] == "VALVE_TAG", "Dense valve 26GB9178 classified as VALVE_TAG")
     assert_test("26CB9131" in cls_by_tag and cls_by_tag["26CB9131"] == "VALVE_TAG", "Dense valve 26CB9131 classified as VALVE_TAG")
 

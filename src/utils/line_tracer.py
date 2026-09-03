@@ -365,26 +365,39 @@ def _find_closest_line_segment(
     """
     Finds the closest line tag using both physical polyline traces and text centroids.
     """
+    from src.utils.tag_stitcher import safe_float
+
     best_tag = None
     min_dist = max_dist
 
     # Check physical polyline traces first
     for tr in traces:
         tag = tr.get("tag")
-        grid_path = tr.get("grid_path", [])
-        if not tag or not grid_path or len(grid_path) < 2:
+        raw_grid_path = tr.get("grid_path", [])
+        if not tag or not raw_grid_path:
             continue
-        for i in range(len(grid_path) - 1):
-            p1 = grid_path[i]
-            p2 = grid_path[i + 1]
-            if len(p1) >= 2 and len(p2) >= 2:
-                # Note: grid_path stores [y, x]
-                y1, x1 = float(p1[0]), float(p1[1])
-                y2, x2 = float(p2[0]), float(p2[1])
-                d = _dist_to_segment(x, y, x1, y1, x2, y2)
-                if d < min_dist:
-                    min_dist = d
-                    best_tag = tag
+
+        # Flatten nested list structures if needed
+        flat_pts: List[Tuple[float, float]] = []
+        for elem in raw_grid_path:
+            if isinstance(elem, (list, tuple)) and len(elem) >= 2:
+                if isinstance(elem[0], (list, tuple)):
+                    for sub_elem in elem:
+                        if isinstance(sub_elem, (list, tuple)) and len(sub_elem) >= 2:
+                            flat_pts.append((safe_float(sub_elem[0]), safe_float(sub_elem[1])))
+                else:
+                    flat_pts.append((safe_float(elem[0]), safe_float(elem[1])))
+
+        if len(flat_pts) < 2:
+            continue
+
+        for i in range(len(flat_pts) - 1):
+            y1, x1 = flat_pts[i]
+            y2, x2 = flat_pts[i + 1]
+            d = _dist_to_segment(x, y, x1, y1, x2, y2)
+            if d < min_dist:
+                min_dist = d
+                best_tag = tag
 
     # Fallback to centroid proximity
     if not best_tag:
