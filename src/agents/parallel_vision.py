@@ -819,6 +819,51 @@ class SymbolRecognitionAgent(BaseAgent):
                     "xmax": round(min(1.0, px + 0.02), 4),
                 })
 
+        # ── Pre-compilation Symbol Validator & Untagged Valve Harvester ────────
+        # For any detected valve symbol lacking an inferred_tag, search nearby text or assign auto-tag
+        valve_type_prefixes = {
+            "GATE_VALVE": "GV",
+            "CHECK_VALVE": "CB",
+            "BALL_VALVE": "BV",
+            "GLOBE_VALVE": "GLV",
+            "NEEDLE_VALVE": "NV",
+            "CONTROL_VALVE": "CV",
+            "BUTTERFLY_VALVE": "BFV",
+            "PLUG_VALVE": "PLV",
+            "SAFETY_VALVE": "PSV",
+            "VALVE": "V",
+        }
+        valve_auto_counter = 1
+        for sym in symbols:
+            stype = sym.get("symbol_type", "").upper()
+            if any(k in stype for k in valve_type_prefixes.keys()) or "VALVE" in stype:
+                if not sym.get("inferred_tag"):
+                    sy = (sym.get("ymin", 0.5) + sym.get("ymax", 0.5)) / 2.0
+                    sx = (sym.get("xmin", 0.5) + sym.get("xmax", 0.5)) / 2.0
+
+                    # Look for nearby VALVE_TAG in text_elements
+                    best_vtag = None
+                    best_vdist = 0.08
+                    for t in texts:
+                        if t.get("classification") == "VALVE_TAG":
+                            tattrs = t.get("attributes") or {}
+                            tx = float(tattrs.get("pos_x", 0.5)) if tattrs.get("pos_x") else 0.5
+                            ty = float(tattrs.get("pos_y", 0.5)) if tattrs.get("pos_y") else 0.5
+                            dist = math.hypot(sx - tx, sy - ty)
+                            if dist < best_vdist:
+                                best_vdist = dist
+                                best_vtag = t.get("tag")
+
+                    if best_vtag:
+                        sym["inferred_tag"] = best_vtag
+                    else:
+                        prefix = valve_type_prefixes.get(stype, "V")
+                        sym["inferred_tag"] = f"{prefix}-SYM-{valve_auto_counter:02d}"
+                        valve_auto_counter += 1
+
+        # Deduplicate overlapping symbols
+        symbols = _deduplicate_tiled_boxes(symbols, iou_thresh=0.45)
+
         logger.info(f"SymbolRecognitionAgent produced {len(symbols)} total graphical symbols.")
         return {"extracted_entities": {"symbols": symbols}}
 

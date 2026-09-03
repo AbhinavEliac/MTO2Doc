@@ -527,7 +527,10 @@ class CompilerAgent(BaseAgent):
         relations: List[Dict], lines: List[LineItem]
     ) -> List[ValveItem]:
         compiled = []
-        seen_canonical: dict = {}  # ── Defect 2 Fix: deduplicate by canonical key
+        seen_canonical: dict = {}  # Deduplicate by canonical key
+        compiled_tags = set()
+
+        # ── Anchor 1: Tagged Valves (from text recognition) ───────────────────
         valve_tags = [t for t in texts if t["classification"] == "VALVE_TAG"]
 
         for v in valve_tags:
@@ -570,6 +573,16 @@ class CompilerAgent(BaseAgent):
             elif tag_upper.startswith(('MOV', 'SDV', 'BDV', 'EV')):
                 v_type = "On-Off Valve"
 
+            # Check if symbol detector identified a more specific valve type
+            coords = None
+            for sym in symbols:
+                if sym.get("inferred_tag") == tag:
+                    coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
+                    st = sym.get("symbol_type", "").upper().replace('_', ' ').title()
+                    if st and "Valve" in st and v_type == "Valve":
+                        v_type = st
+                    break
+
             associated_line = None
             for rel in relations:
                 rtype = rel.get("rel_type", "").upper()
@@ -583,21 +596,18 @@ class CompilerAgent(BaseAgent):
                     break
 
             derived_size = None
+            derived_rating = None
             if associated_line:
                 for line in lines:
                     if line.tag == associated_line:
                         derived_size = line.size
+                        if line.spec and line.spec != "UNSPEC":
+                            derived_rating = line.spec
                         break
 
             attrs = v.get("attributes") or {}
-            rating = v.get("rating") or attrs.get("rating") or attrs.get("pressure_class")
+            rating = v.get("rating") or attrs.get("rating") or attrs.get("pressure_class") or derived_rating
             normal_state = attrs.get("normal_state")
-
-            coords = None
-            for sym in symbols:
-                if sym.get("inferred_tag") == tag:
-                    coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
-                    break
 
             item_obj = ValveItem(
                 tag=tag,
@@ -607,12 +617,94 @@ class CompilerAgent(BaseAgent):
                 rating=rating,
                 normal_state=normal_state,
                 coordinates=coords,
-                type_source="inferred_from_prefix",  # ── Defect 6 Fix
+                type_source="inferred_from_prefix",
                 confidence=float(v.get("confidence", 1.0)),
                 aliases=v.get("aliases") or None,
             )
             compiled.append(item_obj)
             seen_canonical[canon_key] = item_obj
+            compiled_tags.add(tag)
+
+        # ── Anchor 2: Untagged / Symbol-Detected Valves (from vision perception) ─
+        valve_type_map = {
+            "GATE_VALVE": "Gate Valve",
+            "CHECK_VALVE": "Check Valve",
+            "BALL_VALVE": "Ball Valve",
+            "GLOBE_VALVE": "Globe Valve",
+            "NEEDLE_VALVE": "Needle Valve",
+            "CONTROL_VALVE": "Control Valve",
+            "BUTTERFLY_VALVE": "Butterfly Valve",
+            "PLUG_VALVE": "Plug Valve",
+            "SAFETY_VALVE": "Safety Valve",
+            "VALVE": "Manual Valve",
+        }
+
+        for sym in symbols:
+            stype = sym.get("symbol_type", "").upper()
+            is_valve_sym = any(k in stype for k in valve_type_map.keys()) or "VALVE" in stype
+            if not is_valve_sym:
+                continue
+
+            stag = sym.get("inferred_tag")
+            if not stag or stag in compiled_tags:
+                continue
+
+            canon_key = re.sub(r'^\d{2,3}-?', '', stag.upper())
+            if canon_key in seen_canonical:
+                continue
+
+            coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
+            v_type = valve_type_map.get(stype, "Manual Valve")
+
+            # Resolve host pipeline
+            associated_line = None
+            for rel in relations:
+                rtype = rel.get("rel_type", "").upper()
+                if rel.get("source_tag") == stag and rtype == "INSTALLED_ON":
+                    associated_line = rel.get("target_tag")
+                    break
+
+            # If not in relations, find closest line geometrically
+            if not associated_line and lines:
+                sy = (sym["ymin"] + sym["ymax"]) / 2.0
+                sx = (sym["xmin"] + sym["xmax"]) / 2.0
+                best_line = None
+                best_dist = 0.35
+                for line in lines:
+                    if line.coordinates and len(line.coordinates) >= 2:
+                        for pt in line.coordinates:
+                            ly, lx = float(pt[0]), float(pt[1])
+                            d = math.hypot(sx - lx, sy - ly)
+                            if d < best_dist:
+                                best_dist = d
+                                best_line = line.tag
+                associated_line = best_line
+
+            derived_size = None
+            derived_rating = None
+            if associated_line:
+                for line in lines:
+                    if line.tag == associated_line:
+                        derived_size = line.size
+                        if line.spec and line.spec != "UNSPEC":
+                            derived_rating = line.spec
+                        break
+
+            item_obj = ValveItem(
+                tag=stag,
+                type=v_type,
+                size=derived_size,
+                line_tag=associated_line,
+                rating=derived_rating,
+                normal_state=None,
+                coordinates=coords,
+                type_source="symbol_detected",
+                confidence=float(sym.get("confidence", 0.90)),
+                aliases=None,
+            )
+            compiled.append(item_obj)
+            seen_canonical[canon_key] = item_obj
+            compiled_tags.add(stag)
 
         return compiled
 

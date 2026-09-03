@@ -483,6 +483,7 @@ def classify_paddle_results(
     Scan ALL OCR items for embedded engineering tags using drawing-type-aware patterns.
 
     Fixes applied:
+      Pre-processing: Spatial tag stitching to merge split sizes, line tags, and valve tags.
       Defect 2: Post-deduplication pass — merges short/prefixed tag variants by canonical key.
       Defect 3: Spatial setpoint negative-context filter — demotes PI-150, AT-225 setpoint numbers.
       Defect 4: Line-tag grammar validation & size whitelist rejection (262" rejected, 12mm retained).
@@ -490,6 +491,11 @@ def classify_paddle_results(
     Retains ALL non-tag text lines as NOTE annotations so 100% of readable text is preserved.
     Adds 'confidence' and 'flag_reason' to every returned item.
     """
+    from src.utils.tag_stitcher import stitch_fragmented_tags, rectify_ocr_typos
+
+    # Pre-pass: stitch fragmented OCR tags and rectify typos
+    items = stitch_fragmented_tags(items)
+
     found: Dict[str, Dict] = {}  # tag → item (deduplicated by EXACT tag string)
     dt = (drawing_type or 'PID').upper()
 
@@ -501,6 +507,7 @@ def classify_paddle_results(
             continue
 
         t = _normalize(text)
+        t = rectify_ocr_typos(t)
         t = _ocr_correct(t)   # Fix 1: pre-correct OCR character misreads
         if not t or len(t) < 2:
             continue

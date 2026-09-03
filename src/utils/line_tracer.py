@@ -123,6 +123,7 @@ def trace_lines_and_connections(
     earthing = [t for t in text_elements if t.get("classification") in ("EARTH_BAR_TAG", "EARTH_PIT_TAG")]
 
     # A. Map Valves to Piping Lines (INSTALLED_ON)
+    # 1. Tagged valves from text elements
     for v in valves:
         vtag = v.get("tag")
         if not vtag:
@@ -144,7 +145,7 @@ def trace_lines_and_connections(
             vattrs = v.get("attributes") or {}
             vx = float(vattrs.get("pos_x", 0.5)) if vattrs.get("pos_x") else 0.5
             vy = float(vattrs.get("pos_y", 0.5)) if vattrs.get("pos_y") else 0.5
-            target_line = _find_closest_tag(vx, vy, line_items, max_dist=0.45)
+            target_line = _find_closest_line_segment(vx, vy, traces, line_items, max_dist=0.45)
 
         if target_line:
             rkey = (vtag, target_line, "INSTALLED_ON")
@@ -155,6 +156,35 @@ def trace_lines_and_connections(
                     "target_tag": target_line,
                     "rel_type": "INSTALLED_ON"
                 })
+
+    # 2. Untagged valve symbols from symbols detections
+    valve_sym_types = {
+        "VALVE", "GATE_VALVE", "CHECK_VALVE", "BALL_VALVE", "GLOBE_VALVE",
+        "NEEDLE_VALVE", "CONTROL_VALVE", "BUTTERFLY_VALVE", "PLUG_VALVE", "SAFETY_VALVE"
+    }
+    for sym in (symbols or []):
+        stype = sym.get("symbol_type", "").upper()
+        if stype in valve_sym_types or "VALVE" in stype:
+            stag = sym.get("inferred_tag")
+            if not stag:
+                continue
+            # If relationship already registered for this valve tag, skip
+            if any(r["source_tag"] == stag and r["rel_type"] == "INSTALLED_ON" for r in relations):
+                continue
+
+            sy = (sym.get("ymin", 0.5) + sym.get("ymax", 0.5)) / 2.0
+            sx = (sym.get("xmin", 0.5) + sym.get("xmax", 0.5)) / 2.0
+
+            target_line = _find_closest_line_segment(sx, sy, traces, line_items, max_dist=0.40)
+            if target_line:
+                rkey = (stag, target_line, "INSTALLED_ON")
+                if rkey not in existing_rels:
+                    existing_rels.add(rkey)
+                    relations.append({
+                        "source_tag": stag,
+                        "target_tag": target_line,
+                        "rel_type": "INSTALLED_ON"
+                    })
 
     # B. Map Instruments to Piping Lines or Equipment (MONITORS)
     for inst in instruments:
@@ -314,6 +344,53 @@ def trace_lines_and_connections(
             "sheet_grids": sheet_grids,
         }
     }
+
+
+def _dist_to_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """Calculates perpendicular distance from point (px, py) to line segment (x1, y1)-(x2, y2)."""
+    dx = x2 - x1
+    dy = y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 == 0:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / l2))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    return math.hypot(px - proj_x, py - proj_y)
+
+
+def _find_closest_line_segment(
+    x: float, y: float, traces: List[Dict[str, Any]], line_items: List[Dict[str, Any]], max_dist: float = 0.40
+) -> Optional[str]:
+    """
+    Finds the closest line tag using both physical polyline traces and text centroids.
+    """
+    best_tag = None
+    min_dist = max_dist
+
+    # Check physical polyline traces first
+    for tr in traces:
+        tag = tr.get("tag")
+        grid_path = tr.get("grid_path", [])
+        if not tag or not grid_path or len(grid_path) < 2:
+            continue
+        for i in range(len(grid_path) - 1):
+            p1 = grid_path[i]
+            p2 = grid_path[i + 1]
+            if len(p1) >= 2 and len(p2) >= 2:
+                # Note: grid_path stores [y, x]
+                y1, x1 = float(p1[0]), float(p1[1])
+                y2, x2 = float(p2[0]), float(p2[1])
+                d = _dist_to_segment(x, y, x1, y1, x2, y2)
+                if d < min_dist:
+                    min_dist = d
+                    best_tag = tag
+
+    # Fallback to centroid proximity
+    if not best_tag:
+        best_tag = _find_closest_tag(x, y, line_items, max_dist=max_dist)
+
+    return best_tag
 
 
 def _find_closest_tag(
