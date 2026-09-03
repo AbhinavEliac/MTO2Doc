@@ -195,6 +195,59 @@ _RATING_SEARCH = re.compile(
     r'\b(\d{2,4}(?:#|#\s|barg|psig|kpag|bar|mpa|kpa))\b', re.IGNORECASE
 )
 
+# Spec-to-ANSI pressure rating class mapping table (ASME B16.5 / B31.3 / CFIHOS)
+_KNOWN_SPEC_RATING_MAP = {
+    'GC11': '150#', 'GC11S': '150#', 'GC12': '150#', 'GC12S': '150#', 'GC10': '150#',
+    'AC21': '150#', 'AC21S': '150#', 'AC11': '150#', 'AC11S': '150#',
+    'AS20': '300#', 'AS20S': '300#', 'AS10': '300#', 'AS10S': '300#',
+    'BC11': '300#', 'BC11S': '300#', 'BS20': '300#', 'BS20S': '300#',
+    'CC11': '600#', 'CC11S': '600#', 'CS20': '600#', 'CS20S': '600#',
+    'DC11': '900#', 'DC11S': '900#', 'DS20': '900#', 'DS20S': '900#',
+    'EC11': '1500#', 'EC11S': '1500#', 'ES20': '1500#', 'ES20S': '1500#',
+    'FC11': '2500#', 'FC11S': '2500#', 'FS20': '2500#', 'FS20S': '2500#',
+    'FD70': '2500#', 'FD70X': '2500#',
+}
+
+def map_spec_to_rating_class(spec_or_rating: Optional[str]) -> Optional[str]:
+    """
+    Translates a piping spec code (e.g. 'GC11S', 'FC11S-08', 'AS20S') or raw rating
+    into standard ASME / ANSI pressure rating class (e.g. '150#', '300#', '2500#').
+    Filters out non-rating material descriptors like 'TUBE', 'UNSPEC', 'UNK'.
+    """
+    if not spec_or_rating:
+        return None
+    val = str(spec_or_rating).strip().upper()
+    if val in ('TUBE', 'UNSPEC', 'UNK', 'N/A', '-', 'NONE'):
+        return None
+    # If already a standard rating format like 150#, 300#, 2500#, 257 barg
+    if re.search(r'\d{2,4}(?:#|BARG|PSIG|BAR|MPA|KPA|PN\d+)', val):
+        m = re.search(r'(\d{2,4}(?:#|BARG|PSIG|BAR|MPA|KPA|PN\d+))', val)
+        return m.group(1) if m else val
+    # Strip trailing insulation suffix e.g. GC11S-38 -> GC11S
+    base_spec = re.sub(r'-\d+$', '', val)
+    if base_spec in _KNOWN_SPEC_RATING_MAP:
+        return _KNOWN_SPEC_RATING_MAP[base_spec]
+    # Check 4-char prefix
+    if len(base_spec) >= 4 and base_spec[:4] in _KNOWN_SPEC_RATING_MAP:
+        return _KNOWN_SPEC_RATING_MAP[base_spec[:4]]
+    # Check 1st letter standard class code
+    first_char = base_spec[0] if base_spec else ''
+    if first_char == 'A':
+        return '150#'
+    elif first_char == 'B':
+        return '300#'
+    elif first_char == 'C':
+        return '600#'
+    elif first_char == 'D':
+        return '900#'
+    elif first_char == 'E':
+        return '1500#'
+    elif first_char == 'F':
+        return '2500#'
+    elif first_char == 'G':
+        return '150#'
+    return None
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Electrical Layout Patterns
 # ──────────────────────────────────────────────────────────────────────────────
@@ -570,8 +623,11 @@ def classify_paddle_results(
             if full_tag in found and found[full_tag]['classification'] != 'NOTE':
                 continue
 
-            _VALVE_FUNCTION_CODES = {'CB', 'GB', 'BL', 'GT', 'BT', 'GL', 'NV'}
-            if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 4:
+            _VALVE_FUNCTION_CODES = {
+                'CB', 'GB', 'BL', 'GT', 'BT', 'GL', 'NV', 'BV', 'PL', 'BF', 'CK', 'ND',
+                'HV', 'XV', 'MOV', 'SDV', 'BDV', 'CV', 'PCV', 'TCV', 'FCV', 'LCV', 'ZV', 'EV'
+            }
+            if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 3:
                 cat = 'VALVE_TAG'
             elif code in _INSTRUMENT_CODES:
                 cat = 'INSTRUMENT_TAG'

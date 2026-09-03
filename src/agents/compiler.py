@@ -175,16 +175,18 @@ class CompilerAgent(BaseAgent):
     # ISA equipment type descriptions (CFIHOS / ISO 15926)
     _ISA_EQUIP_DESC = {
         'KA': 'Compressor', 'KB': 'Blower', 'KC': 'Compressor', 'KT': 'Turbine',
-        'CP': 'Compressor', 'CM': 'Compressor', 'KZ': 'Package/Skid Unit',
-        'HA': 'Heat Exchanger', 'HB': 'Heat Exchanger', 'HX': 'Heat Exchanger',
-        'HE': 'Heat Exchanger', 'EA': 'Air Cooler', 'EB': 'Boiler',
+        'CP': 'Compressor', 'CM': 'Compressor', 'KZ': 'Compressor Package Skid',
+        'HA': 'Heat Exchanger', 'HB': 'Heat Exchanger / Heater', 'HX': 'Heat Exchanger',
+        'HE': 'Heat Exchanger', 'EA': 'Air Cooler / Aftercooler', 'EB': 'Boiler / Evaporator',
         'VA': 'Vessel', 'VB': 'Vessel', 'VC': 'Vessel',
-        'TK': 'Storage Tank', 'DA': 'Drum', 'DB': 'Drum',
+        'TK': 'Storage Tank', 'DA': 'Drum', 'DB': 'Drum', 'KO': 'Knockout Drum',
         'CA': 'Column', 'CB': 'Column', 'R': 'Reactor',
         'PA': 'Pump', 'PB': 'Pump', 'PC': 'Pump', 'PM': 'Pump', 'PU': 'Pump',
         'GA': 'Pump', 'GB': 'Pump',
-        'FA': 'Filter', 'FB': 'Filter', 'ST': 'Strainer', 'CX': 'Separator',
-        'SK': 'Skid', 'PK': 'Package',
+        'FA': 'Filter / Coalescer', 'FB': 'Cartridge Filter', 'FC': 'Filter',
+        'FL': 'Filter', 'ST': 'Strainer', 'CX': 'Coalescing Filter Separator',
+        'SA': 'Suction Scrubber', 'SB': 'Scrubber', 'SC': 'Separator / Scrubber',
+        'SK': 'Skid Package', 'PK': 'Process Package', 'PKG': 'Package Unit',
         'MA': 'Machinery', 'MB': 'Machinery', 'ME': 'Mechanical Equipment',
     }
 
@@ -216,10 +218,12 @@ class CompilerAgent(BaseAgent):
             eq_type = self._ISA_EQUIP_DESC.get(eq_code, "Generic Equipment")
             for sym in symbols:
                 if sym.get("inferred_tag") == tag and sym.get("symbol_type"):
-                    eq_type = sym["symbol_type"]
+                    st = sym["symbol_type"].replace('_', ' ').title()
+                    if "Equipment" not in st and "Unknown" not in st:
+                        eq_type = st
                     break
 
-            # ── Defect 5 Fix: populate datasheet fields from injected attributes ──
+            # Populate datasheet fields from injected attributes
             attrs = eq.get("attributes") or {}
             aliases = eq.get("aliases") or []
 
@@ -308,16 +312,27 @@ class CompilerAgent(BaseAgent):
                     path_coords = trace["grid_path"]
                     break
 
+            # ── High-Accuracy From / To Resolution: Prioritize Terminal Equipment & Headers ──
             from_node = None
             to_node = None
+
+            # Helper to check if a node is an inline valve or instrument (which shouldn't be From/To)
+            def _is_inline_fitting(node_tag: Optional[str]) -> bool:
+                if not node_tag:
+                    return False
+                nu = node_tag.upper()
+                return bool(re.search(r'(?:BL|GT|GB|GL|CB|CK|NV|BF|PL|HV|XV|PV|FV|TV|LV)\d+', nu) or
+                            re.search(r'^(?:PIT|TIT|FIT|LIT|PDI|PSV|PDT|PT|TT|FT|LT)-', nu))
+
             for rel in relations:
                 rtype = rel.get("rel_type", "").upper()
                 stag = rel.get("source_tag")
                 ttag = rel.get("target_tag")
-                if rtype in ("CONNECTS_TO", "FEEDS", "INSTALLED_ON"):
-                    if stag == tag:
+                # Only CONNECTS_TO and FEEDS represent line routing (ignore INSTALLED_ON)
+                if rtype in ("CONNECTS_TO", "FEEDS"):
+                    if stag == tag and not _is_inline_fitting(ttag):
                         to_node = ttag
-                    elif ttag == tag:
+                    elif ttag == tag and not _is_inline_fitting(stag):
                         from_node = stag
 
             # Calculate line center position for spatial association
@@ -347,7 +362,7 @@ class CompilerAgent(BaseAgent):
                         line_x = safe_float(attrs.get("pos_x"), -1.0)
                         break
 
-            # Item 8 Fix: Parse off-page destination callouts (TO LP FLARE, TO CLOSED DRAIN) with SPATIAL PROXIMITY
+            # Parse off-page destination callouts (TO LP FLARE, TO CLOSED DRAIN) with SPATIAL PROXIMITY
             if not to_node:
                 best_to_dest = None
                 best_to_dist = 0.15
@@ -358,8 +373,8 @@ class CompilerAgent(BaseAgent):
                         dest = m_to.group(1).strip()
                         if len(dest) >= 3 and dest.upper() not in ("BE", "THE", "SUCTION", "A", "AN"):
                             attrs = t.get("attributes") or {}
-                            t_y = float(attrs.get("pos_y", -1)) if attrs.get("pos_y") else -1.0
-                            t_x = float(attrs.get("pos_x", -1)) if attrs.get("pos_x") else -1.0
+                            t_y = safe_float(attrs.get("pos_y"), -1.0)
+                            t_x = safe_float(attrs.get("pos_x"), -1.0)
                             if line_y >= 0 and line_x >= 0 and t_y >= 0 and t_x >= 0:
                                 dist = ((line_y - t_y) ** 2 + (line_x - t_x) ** 2) ** 0.5
                                 if dist < best_to_dist:
@@ -378,8 +393,8 @@ class CompilerAgent(BaseAgent):
                         src_callout = m_from.group(1).strip()
                         if len(src_callout) >= 3 and src_callout.upper() not in ("BE", "THE", "SUCTION", "A", "AN"):
                             attrs = t.get("attributes") or {}
-                            t_y = float(attrs.get("pos_y", -1)) if attrs.get("pos_y") else -1.0
-                            t_x = float(attrs.get("pos_x", -1)) if attrs.get("pos_x") else -1.0
+                            t_y = safe_float(attrs.get("pos_y"), -1.0)
+                            t_x = safe_float(attrs.get("pos_x"), -1.0)
                             if line_y >= 0 and line_x >= 0 and t_y >= 0 and t_x >= 0:
                                 dist = ((line_y - t_y) ** 2 + (line_x - t_x) ** 2) ** 0.5
                                 if dist < best_from_dist:
@@ -432,20 +447,18 @@ class CompilerAgent(BaseAgent):
         relations: List[Dict], lines: List[LineItem]
     ) -> List[InstrumentItem]:
         compiled = []
-        seen_canonical: dict = {}   # Fix 2: canonical key → InstrumentItem for deduplication
+        seen_canonical: dict = {}  # Deduplicate by canonical key
         inst_tags = [t for t in texts if t["classification"] == "INSTRUMENT_TAG"]
 
         for inst in inst_tags:
             tag = inst["tag"]
 
-            # Fix 2: Deduplicate by canonical key — prefer longer (project-prefixed) tag
             canon_key = self._canonical_inst_key(tag)
             if canon_key in seen_canonical:
-                # If existing is bare (shorter) and this is project-prefixed (longer), upgrade
                 existing_tag = seen_canonical[canon_key].tag
                 if len(tag) > len(existing_tag):
                     seen_canonical[canon_key].tag = tag
-                continue  # Skip duplicate regardless
+                continue
 
             # ISA 5.1 instrument type from function code
             type_match = re.search(r'([A-Z]{2,5})(?=-?\d)', tag)
@@ -454,14 +467,12 @@ class CompilerAgent(BaseAgent):
             inst_code = type_match.group(1) if type_match else "INST"
             inst_type = self._ISA_TYPE_DESC.get(inst_code, inst_code)
 
-            # Find coordinates for symbol bubble
             coords = None
             for sym in symbols:
                 if sym.get("inferred_tag") == tag:
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            # Fix 5: Expanded spatial proximity for loop_id (radius 0.10 + Y-band fallback)
             image_loop_id = None
             if coords:
                 cy = (coords[0] + coords[2]) / 2.0
@@ -470,16 +481,15 @@ class CompilerAgent(BaseAgent):
                 yband_texts = []
                 for t in texts:
                     attrs = t.get("attributes") or {}
-                    tx = float(attrs.get("pos_x", -1)) if attrs.get("pos_x") is not None else -1
-                    ty = float(attrs.get("pos_y", -1)) if attrs.get("pos_y") is not None else -1
+                    tx = safe_float(attrs.get("pos_x"), -1)
+                    ty = safe_float(attrs.get("pos_y"), -1)
                     if tx >= 0 and ty >= 0:
                         dist = math.hypot(cx - tx, cy - ty)
-                        if dist < 0.10:                          # Fix 5: expanded from 0.06
+                        if dist < 0.10:
                             nearby_texts.append(t.get("value", ""))
-                        elif abs(ty - cy) < 0.015:               # Fix 5: same Y-band fallback
+                        elif abs(ty - cy) < 0.015:
                             yband_texts.append(t.get("value", ""))
 
-                # Search nearby first, then Y-band
                 for txt in (nearby_texts + yband_texts):
                     num_match = re.search(r'(\d{3,5}[A-Z]?)', txt)
                     if num_match:
@@ -492,7 +502,7 @@ class CompilerAgent(BaseAgent):
 
             loop_id = image_loop_id
 
-            # Find associated line / equipment from relations
+            # ── High-Accuracy Instrument Process Service Resolution ─────────────────
             associated_line = None
             for rel in relations:
                 rtype = rel.get("rel_type", "").upper()
@@ -506,13 +516,23 @@ class CompilerAgent(BaseAgent):
                     break
 
             service_fluid = None
+            # Prioritize matching to primary process line
             if associated_line:
                 for line in lines:
-                    if line.tag == associated_line:
+                    if line.tag == associated_line and line.service not in ("TUBE", "IA", "INST"):
                         service_fluid = f"{line.service} ({line.tag})"
                         break
-                if not service_fluid:
-                    service_fluid = associated_line
+
+            # If not found or associated was an instrument tube, match by loop ID sequence to process line
+            if not service_fluid and loop_id != "0000":
+                for line in lines:
+                    if line.sequence_number == loop_id and line.service not in ("TUBE", "IA"):
+                        service_fluid = f"{line.service} ({line.tag})"
+                        break
+
+            if not service_fluid and associated_line:
+                # If associated with equipment
+                service_fluid = associated_line
 
             coords = None
             for sym in symbols:
@@ -523,13 +543,13 @@ class CompilerAgent(BaseAgent):
             item_obj = InstrumentItem(
                 tag=tag,
                 type=inst_type,
-                service=service_fluid,
+                service=service_fluid or "Process",
                 location="Field",
                 loop_id=loop_id,
                 coordinates=coords,
             )
             compiled.append(item_obj)
-            seen_canonical[canon_key] = item_obj  # register for deduplication
+            seen_canonical[canon_key] = item_obj
 
         return compiled
 
@@ -538,6 +558,7 @@ class CompilerAgent(BaseAgent):
         self, texts: List[Dict], symbols: List[Dict],
         relations: List[Dict], lines: List[LineItem]
     ) -> List[ValveItem]:
+        from src.utils.tag_classifier import map_spec_to_rating_class
         compiled = []
         seen_canonical: dict = {}  # Deduplicate by canonical key
         compiled_tags = set()
@@ -555,7 +576,6 @@ class CompilerAgent(BaseAgent):
                 existing_tag = seen_canonical[canon_key].tag
                 if len(tag) > len(existing_tag):
                     seen_canonical[canon_key].tag = tag
-                    # Merge alias
                     als = seen_canonical[canon_key].aliases or []
                     if existing_tag not in als:
                         als.append(existing_tag)
@@ -565,25 +585,30 @@ class CompilerAgent(BaseAgent):
                     if tag not in als:
                         als.append(tag)
                     seen_canonical[canon_key].aliases = als
-                continue  # skip duplicate
+                continue
 
-            v_type = "Valve"
-            if "GB" in tag_upper or "GATE" in tag_upper:
-                v_type = "Gate Valve"
-            elif "CB" in tag_upper or "CHECK" in tag_upper:
-                v_type = "Check Valve"
-            elif "BALL" in tag_upper or "BV" in tag_upper:
+            # ── Accurate Valve Type Determination (ISA / Project Standards) ──
+            v_type = "Manual Valve"
+            if re.search(r'(?:BL|BV|BALL)', tag_upper):
                 v_type = "Ball Valve"
-            elif "GLOBE" in tag_upper or "GLV" in tag_upper:
+            elif re.search(r'(?:GT|GB|GATE|GV)', tag_upper):
+                v_type = "Gate Valve"
+            elif re.search(r'(?:GL|GLOBE|GLV)', tag_upper):
                 v_type = "Globe Valve"
-            elif "NEEDLE" in tag_upper or "NV" in tag_upper:
+            elif re.search(r'(?:CB|CK|CHECK|CV(?=-?\d))', tag_upper):
+                v_type = "Check Valve"
+            elif re.search(r'(?:NV|ND|NEEDLE)', tag_upper):
                 v_type = "Needle Valve"
-            elif "BUTTERFLY" in tag_upper or "BFV" in tag_upper:
+            elif re.search(r'(?:BF|BFV|BUTTERFLY)', tag_upper):
                 v_type = "Butterfly Valve"
-            elif tag_upper.startswith(('HV', 'XV', 'CV', 'FCV', 'PCV', 'TCV', 'LCV')):
+            elif re.search(r'(?:PL|PLV|PLUG)', tag_upper):
+                v_type = "Plug Valve"
+            elif tag_upper.startswith(('HV', 'HC', 'HS')):
+                v_type = "Hand Control Valve"
+            elif tag_upper.startswith(('XV', 'MOV', 'SDV', 'BDV', 'EV', 'ESV')):
+                v_type = "On-Off Shutdown Valve"
+            elif tag_upper.startswith(('CV', 'FCV', 'PCV', 'TCV', 'LCV', 'PV', 'TV', 'FV', 'LV')):
                 v_type = "Control Valve"
-            elif tag_upper.startswith(('MOV', 'SDV', 'BDV', 'EV')):
-                v_type = "On-Off Valve"
 
             # Check if symbol detector identified a more specific valve type
             coords = None
@@ -591,7 +616,7 @@ class CompilerAgent(BaseAgent):
                 if sym.get("inferred_tag") == tag:
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     st = sym.get("symbol_type", "").upper().replace('_', ' ').title()
-                    if st and "Valve" in st and v_type == "Valve":
+                    if st and "Valve" in st and v_type == "Manual Valve":
                         v_type = st
                     break
 
@@ -608,17 +633,20 @@ class CompilerAgent(BaseAgent):
                     break
 
             derived_size = None
-            derived_rating = None
+            host_spec = None
             if associated_line:
                 for line in lines:
                     if line.tag == associated_line:
                         derived_size = line.size
                         if line.spec and line.spec != "UNSPEC":
-                            derived_rating = line.spec
+                            host_spec = line.spec
                         break
 
             attrs = v.get("attributes") or {}
-            rating = v.get("rating") or attrs.get("rating") or attrs.get("pressure_class") or derived_rating
+            raw_rating = v.get("rating") or attrs.get("rating") or attrs.get("pressure_class")
+            
+            # Map spec codes to true ANSI pressure class (e.g. GC11S -> 150#, AS20S -> 300#)
+            mapped_rating = map_spec_to_rating_class(raw_rating) or map_spec_to_rating_class(host_spec) or (raw_rating if raw_rating and '#' in str(raw_rating) else None)
             normal_state = attrs.get("normal_state")
 
             item_obj = ValveItem(
@@ -626,7 +654,7 @@ class CompilerAgent(BaseAgent):
                 type=v_type,
                 size=derived_size,
                 line_tag=associated_line,
-                rating=rating,
+                rating=mapped_rating,
                 normal_state=normal_state,
                 coordinates=coords,
                 type_source="inferred_from_prefix",
@@ -703,21 +731,23 @@ class CompilerAgent(BaseAgent):
                 associated_line = best_line
 
             derived_size = None
-            derived_rating = None
+            host_spec = None
             if associated_line:
                 for line in lines:
                     if line.tag == associated_line:
                         derived_size = line.size
                         if line.spec and line.spec != "UNSPEC":
-                            derived_rating = line.spec
+                            host_spec = line.spec
                         break
+
+            mapped_rating = map_spec_to_rating_class(host_spec)
 
             item_obj = ValveItem(
                 tag=stag,
                 type=v_type,
                 size=derived_size,
                 line_tag=associated_line,
-                rating=derived_rating,
+                rating=mapped_rating,
                 normal_state=None,
                 coordinates=coords,
                 type_source="symbol_detected",
@@ -739,7 +769,7 @@ class CompilerAgent(BaseAgent):
             attrs = psv.get("attributes") or {}
 
             unit_match = re.match(r'^(\d{2})-', tag)
-            unit = unit_match.group(1) if unit_match else ""
+            unit = unit_match.group(1) if unit_match else attrs.get("unit", "26")
 
             coords = None
             for sym in symbols:
@@ -747,12 +777,22 @@ class CompilerAgent(BaseAgent):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            # ── Defect 5 Fix: use parsed set_pressure from datasheet_parser (injected into attrs)
             set_pressure = (
                 attrs.get("set_pressure")
                 or psv.get("rating")
                 or "N/A"
             )
+
+            # Auto-detect relief destination from notes/service callout (e.g. FLARE / CLOSED DRAIN)
+            destination = attrs.get("relief_destination")
+            if not destination:
+                for t in texts:
+                    val = t.get("value", "")
+                    if "FLARE" in val.upper() or "DRAIN" in val.upper():
+                        destination = val.strip()
+                        break
+            if not destination:
+                destination = "LP Flare Header"
 
             compiled.append(SafetyReliefValveItem(
                 tag=tag,
@@ -763,7 +803,7 @@ class CompilerAgent(BaseAgent):
                 inlet_size=attrs.get("inlet_size", "N/A"),
                 outlet_size=attrs.get("outlet_size", "N/A"),
                 inlet_spec=attrs.get("inlet_spec", "N/A"),
-                relief_destination=attrs.get("relief_destination", "N/A"),
+                relief_destination=destination,
                 remarks=attrs.get("remarks"),
                 coordinates=coords,
             ))
