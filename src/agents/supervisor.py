@@ -87,13 +87,19 @@ class SupervisorAgent(BaseAgent):
         Invokes Vision API to identify layout margins and divide the drawing.
         """
         system_instruction = (
-            "You are an expert design engineer. Analyze the border grids of the P&ID drawing sheet "
-            "and segment the drawing layout into structured region cells."
+            "You are a master engineering drawing layout analyst. "
+            "Examine the spatial architecture of this engineering drawing sheet and segment it into "
+            "discrete functional zones (high-density process canvas, equipment datasheet/table blocks, "
+            "symbol legend, drawing notes/revisions, and title block)."
         )
         
         prompt = (
-            "Look at the drawing boundaries. Identify the normalized bounding boxes [ymin, xmin, ymax, xmax] "
-            "for the three major grid cells containing high-density equipment/lines, legend region, and title block region."
+            "Partition the drawing canvas into normalized bounding boxes [ymin, xmin, ymax, xmax] (0.0 to 1.0):\n"
+            "1. Process Canvas / Main Schematic: The primary central drawing area containing equipment, piping, instruments, and circuits.\n"
+            "2. Equipment Datasheet / Parameter Blocks: Tabular parameter blocks containing engineering design specs (duty, flow, pressure, temperature, materials).\n"
+            "3. Legend & General Notes: Area containing symbol definitions, line type legends, and numbered project notes.\n"
+            "4. Title Block: Bottom-right metadata block with drawing number, client, project title, and revision history.\n\n"
+            "Return the localized grid coordinate regions conforming to LayoutSegmentation."
         )
         
         try:

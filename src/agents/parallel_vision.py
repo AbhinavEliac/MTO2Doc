@@ -84,60 +84,56 @@ def _deduplicate_tiled_boxes(raw_boxes: List[Dict[str, Any]], iou_thresh: float 
 # ──────────────────────────────────────────────────────────────────────────────
 
 _PID_TAG_CATEGORIES = (
-    "  - EQUIPMENT_TAG: Compressors, motors, vessels, skids, coolers, filters "
-    "(e.g., 26-KA-901, TK-101, P-101).\n"
-    "  - LINE_TAG: Piping run descriptions with size, fluid service, spec class "
-    "(e.g., 8\"-PV-26-9035-FC11S-08, 3\"-VA-26-9121-AC21-00).\n"
-    "  - INSTRUMENT_TAG: Sensors, bubbles, transmitters, indicators "
-    "(e.g., PIT-9062, TIT-9057, PDIT-9054).\n"
-    "  - VALVE_TAG: Manual, control, check, gate, globe, needle valves "
-    "(e.g., 26GB9178, HV-101, XV-201).\n"
-    "  - PSV_TAG: Pressure Safety Valves (e.g., 26-PSV-9066A, PSV-101A).\n"
-    "  - NOTE: Plain English notes, descriptions, labels (e.g., HIGH POINT, NOTE 35).\n"
-    "  - RATING: Numeric specs like 150#, 2500#, pressure classes.\n"
+    "  - EQUIPMENT_TAG: Process equipment tags with or without area prefix (e.g. 26-KA-902 compressor, "
+    "26-CX-9021 coalescing filter, 26-HA-911 heat exchanger, 26-TK-9001 storage tank, 26-ST-9002 suction strainer, "
+    "26-PA-901A pump). Capture sub-trains (e.g. HA-911-C01, HA-911-C02) and extract all dense datasheet block parameters "
+    "(duty, design pressure, design temperature, flow rate, material, vendor, motor rating) into attributes.\n"
+    "  - LINE_TAG: Complete piping line designations following ISA format [Size]-[Service]-[Area]-[Sequence]-[Spec]-[Insulation] "
+    "(e.g. 8\"-PV-26-9035-FC11S-08, 10\"-VF-43-9027-AS20S-00, 3\"-VA-26-9121-AC21-00). Do NOT invent notes or note suffixes. "
+    "Reject electrical cables, transmitter loops, or motor tags from line list.\n"
+    "  - INSTRUMENT_TAG: ISA 5.1 sensor bubbles, transmitters, switches, and relays (e.g. 26-PIT-9077, TIT-9057, "
+    "26-PDI-9054, 27-PY-0001BA/BB, ZIT-9011, VIT-9020). For split sibling tags ('BA/BB'), emit both individual items.\n"
+    "  - VALVE_TAG: In-line manual and actuated valves with functional categorization (e.g. 26GB9178 Gate, 26CB9131 Check, "
+    "43BL9070 Ball, HV-101 Hand Control, XV-201 Shutdown, 26-ND-901 Needle, 26-BF-902 Butterfly). Extract ANSI rating class (150#, 300#, 2500#).\n"
+    "  - PSV_TAG: Pressure Safety Relief Valves (e.g. 26-PSV-9066A, PSV-9027A, PSV-9027B). Capture set pressure (e.g. 225.4 bar(g)), "
+    "inlet/outlet sizes, and relief header destination (e.g. HP Flare Header, LP Flare Header).\n"
+    "  - NOTE: Engineering callouts, revision notes, hold notes, and drawing reference markers (e.g. 'SEE DWG', 'HOLD', 'NOTE 12').\n"
+    "  - RATING: Pressure/temperature ratings, flange classes (150#, 300#, 600#, 900#, 1500#, 2500#, PN16, PN40) and setpoint values.\n"
 )
 
 _ELECTRICAL_TAG_CATEGORIES = (
-    "  - PANEL_TAG: Distribution boards, MDBs, LDBs, switchgear panels "
-    "(e.g., DB-01, MDB-A, LDB-3, EMDB, SMDB).\n"
-    "  - LUMINAIRE_TAG: Light fittings, lamps, luminaires "
-    "(e.g., L-01, LS-201, TL-101, FL-01).\n"
-    "  - CIRCUIT_TAG: Electrical circuits, breakers, MCBs "
-    "(e.g., C-101, CB-01, MCB-1, RCCB-3).\n"
-    "  - ELEVATION_TAG: Elevation labels and level references "
-    "(e.g., EL.101.445, TL 100.000, EL +103.000).\n"
-    "  - EQUIPMENT_TAG: Generic equipment tags (e.g., AHU-01, FAN-01, AC-01).\n"
-    "  - NOTE: Wiring notes, area labels, installation notes.\n"
-    "  - RATING: Electrical ratings (e.g., 415V, 32A, 3Φ).\n"
+    "  - PANEL_TAG: Distribution boards, main switchboards, MDBs, LDBs, MCCs, control panels "
+    "(e.g. DB-01, MDB-A, LDB-3, EMDB, SMDB, MCC-26).\n"
+    "  - LUMINAIRE_TAG: Light fittings, lamps, emergency exit lights, floodlights (e.g. L-01, LS-201, TL-101, FL-01, EX-01).\n"
+    "  - CIRCUIT_TAG: Electrical branch circuits, circuit breakers, MCBs, MCCBs, fuses (e.g. C-101, CB-01, MCB-1, RCCB-3, DB-1/R1).\n"
+    "  - ELEVATION_TAG: Elevation references and mounting heights (e.g. EL.101.445, TL 100.000, +2.400 AFF, +0.500 FFL).\n"
+    "  - EQUIPMENT_TAG: Motors, HVAC units, transformers, generators, UPS, AHUs (e.g. M-101, TR-01, AHU-01, GEN-01).\n"
+    "  - NOTE: Wiring specifications, installation notes, conduit sizes (e.g. 3x2.5mm² Cu/XLPE/PVC in 25mmØ conduit).\n"
+    "  - RATING: Voltage, amperage, frequency ratings (e.g. 415V, 230V, 32A, 100A, 3Φ 50Hz, IP65, 2x36W).\n"
 )
 
 _EARTHING_TAG_CATEGORIES = (
-    "  - EARTH_BAR_TAG: Earthing bars and main earth terminals "
-    "(e.g., EB-01, EBM-01, MEB).\n"
-    "  - EARTH_PIT_TAG: Earth electrodes and earth pits "
-    "(e.g., EP-01, EP-A, earth pit).\n"
-    "  - BOND_CONDUCTOR_TAG: Bonding conductors and earth cables "
-    "(e.g., BC-01, EC-01, earthing conductor).\n"
-    "  - EQUIPMENT_TAG: Equipment being earthed (e.g., structural members, tanks, panels).\n"
-    "  - ELEVATION_TAG: Elevation labels (e.g., EL.101.445, TL 100.000).\n"
-    "  - NOTE: Installation notes, material specs (e.g., 50x6mm Copper Tape).\n"
-    "  - RATING: Resistance values, conductor sizes (e.g., <1 Ohm, 95mm²).\n"
+    "  - EARTH_BAR_TAG: Main earthing terminals, earth bars, clean earth bars (e.g. EB-01, EBM-01, MEB, EEB, TEB).\n"
+    "  - EARTH_PIT_TAG: Earth test pits, earth electrodes, bore earth pits (e.g. EP-01, EP-A, TP-01, Earth Pit #4).\n"
+    "  - BOND_CONDUCTOR_TAG: Earthing tape, bonding jumpers, grounding conductors (e.g. BC-01, EC-01, 50x6mm Cu Tape, 70mm² PVC Green/Yellow).\n"
+    "  - EQUIPMENT_TAG: Structures, tanks, vessels, skids, motors, fence gates requiring grounding (e.g. TK-101, SK-01, Steel Column B4).\n"
+    "  - ELEVATION_TAG: Ground elevation benchmarks and depth markings (e.g. EL.100.000, GL 0.000, -3.000m depth).\n"
+    "  - NOTE: Resistance requirements and jointing specifications (e.g. '< 1.0 Ohm', 'Cadweld exothermic connection').\n"
+    "  - RATING: Resistance and cross-sectional conductor ratings (e.g. 0.5 Ohm, 95mm², 120kA 1s).\n"
 )
 
 _SLD_TAG_CATEGORIES = (
-    "  - PANEL_TAG: Switchgear, busbars, transformers, MVDBs, LVDBs "
-    "(e.g., MVDB-01, LVDB-A, TR-01, MSB).\n"
-    "  - CIRCUIT_TAG: Feeders, breakers, contactors "
-    "(e.g., ACB-01, MCCB-3, VCB-01, feeder).\n"
-    "  - EQUIPMENT_TAG: Motors, loads, generators (e.g., M-101, G-01).\n"
-    "  - RATING: Electrical ratings (e.g., 11kV, 415V, 500kVA, 1250A).\n"
-    "  - NOTE: Protection settings, fault levels, cable sizes.\n"
+    "  - PANEL_TAG: Switchboards, busbars, MV/LV switchgear, motor control centers (e.g. MVDB-01, LVDB-A, TR-01, MSB, 11kV BUS-A).\n"
+    "  - CIRCUIT_TAG: Air circuit breakers (ACB), vacuum circuit breakers (VCB), MCCBs, isolators, contactors (e.g. ACB-01, VCB-02, Q1, F1).\n"
+    "  - EQUIPMENT_TAG: Heavy electrical loads, transformers, generators, variable frequency drives (VFD), motors (e.g. TR-01, M-101, VFD-01).\n"
+    "  - RATING: Short circuit withstand, busbar current, voltage ratings (e.g. 11kV, 415V, 50kA 1s, 2500A, 500kVA, PF 0.85).\n"
+    "  - NOTE: Protection relay settings, CT/PT ratios, interlock logic (e.g. 50/51 100/5A 5P20, Kast key interlock).\n"
 )
 
 _GENERIC_TAG_CATEGORIES = (
-    "  - EQUIPMENT_TAG: Any equipment with a tag number (e.g., TK-101, P-101, E-201).\n"
-    "  - NOTE: Labels, descriptions, specifications.\n"
-    "  - RATING: Numeric specifications.\n"
+    "  - EQUIPMENT_TAG: Any tagged industrial equipment or mechanical assembly (e.g. TK-101, P-101, E-201, C-101).\n"
+    "  - NOTE: Descriptive engineering text, labels, instructions, material notes.\n"
+    "  - RATING: Physical, electrical, or thermal ratings.\n"
 )
 
 _SYMBOL_VOCAB: Dict[str, str] = {
@@ -540,16 +536,29 @@ class TextRecognitionAgent(BaseAgent):
             tag_categories = _get_tag_categories(drawing_type)
 
             reasoning_prompt = (
-                f"You are an expert engineering data parser and reasoning engine for {drawing_type.replace('_', ' ')} drawings.\n"
-                "Below is the Layer 1 OCR output extracted from the drawing:\n"
+                f"You are a senior process and electrical engineering data parser and reasoning engine analyzing a {drawing_type.replace('_', ' ')} drawing.\n"
+                "Below is the Layer 1 raw OCR text elements extracted from the drawing:\n"
                 "  <text> | conf=<confidence> | pos=(<center_x>, <center_y>)\n\n"
                 f"RAW OCR TEXT FROM LAYER 1:\n{raw_text_block}\n\n"
-                "PERFORM DEEP REASONING & REFINEMENT:\n"
-                "1. FIX OCR TYPOS: Correct misread letters/digits (e.g., P1T-9055 -> PIT-9055, 0B-01 -> DB-01, E8-01 -> EB-01).\n"
-                "2. RECOMBINE SPLIT TEXT: Re-assemble tags that were split across multiple OCR lines.\n"
-                "3. IDENTIFY MISPLACED DATA: Map nearby specifications (design pressure, design temp, wattage, rating, cable size, elevation, material, duty) into the parent tag's attributes dict.\n"
-                "4. FIND MISSING TAGS/ENTITIES: Visually inspect the drawing image to find any missing tags or equipment referenced in callouts or note blocks.\n"
-                "5. CLASSIFY & STRUCTURE: Map every entity into ONE of the following categories:\n"
+                "EXECUTE RIGOROUS ENGINEERING REASONING & REFINEMENT:\n"
+                "1. FIX OCR TYPOS & DECIMAL POINTS:\n"
+                "   - Correct misread characters (e.g., P1T-9055 -> PIT-9055, 0B-01 -> DB-01, E8-01 -> EB-01, FC115 -> FC11S, B\" -> 8\").\n"
+                "   - Restore zero-prefixed missing decimal points in pressure ratings (e.g., '005BARG' -> '0.005 BARG', '050BARG' -> '0.50 BARG').\n"
+                "2. RECOMBINE SPATIALLY SPLIT TEXT:\n"
+                "   - Re-assemble multi-line piping strings (e.g., size '8\"', service 'PV', spec 'FC11S' on adjacent lines -> '8\"-PV-26-9035-FC11S-08').\n"
+                "   - Re-assemble split valve and instrument tags (e.g., 'HV-' and '101' -> 'HV-101').\n"
+                "3. SPLIT SIBLING TAGS & INVERTED NOTATIONS:\n"
+                "   - Split dual instrument transmitter tags (e.g., '27-PY-0001BA/BB' -> emit '27-PY-0001BA' and '27-PY-0001BB').\n"
+                "   - Invert drawing-specific suction strainer tags (e.g., '9002 S 26' -> emit '26-ST-9002' as EQUIPMENT_TAG).\n"
+                "4. EQUIPMENT DATASHEET & ATTRIBUTE BINDING:\n"
+                "   - Parse dense parameter blocks (Duty, Design Pressure, Design Temp, Flow Rate, Material, Vendor, Flange Rating) and inject them into the parent equipment/valve attributes dict.\n"
+                "   - For PSVs, capture exact set pressure (e.g., '225.4 bar(g)'), inlet/outlet sizes, and relief header destination ('HP Flare Header').\n"
+                "5. ANTI-HALLUCINATION & STRICT SCHEMA VALIDATION:\n"
+                "   - Do NOT invent placeholder suffixes ('...-NOTE', '...-TIT') in piping lines.\n"
+                "   - Do NOT classify motor tags (e.g., '26-KA-902-M01') or instrument wires as lines.\n"
+                "   - Ensure reference callouts ('FROM DWG', 'CONTINUED ON') are marked as reference notes.\n"
+                "6. CLASSIFY & STRUCTURE:\n"
+                "   - Categorize every entity accurately into ONE of the following classes:\n"
                 + tag_categories + "\n"
                 "Return the cleaned, structured findings as a validated RawTextList JSON."
             )
@@ -558,8 +567,8 @@ class TextRecognitionAgent(BaseAgent):
                 schema=RawTextList,
                 prompt=reasoning_prompt,
                 system_instruction=(
-                    "You are an AI engineering data reasoning engine. Your goal is to find missing data, "
-                    "correct OCR errors, map misplaced attributes, and output clean structured JSON."
+                    "You are an expert AI engineering data reasoning engine. Your objective is to achieve 100% extraction fidelity: "
+                    "correct all OCR errors, restore dropped decimals, bind datasheet attributes, reject hallucinations, and output clean structured JSON."
                 ),
                 image_path=raw_image,
                 provider=llm_provider,
@@ -751,14 +760,24 @@ class SymbolRecognitionAgent(BaseAgent):
         elif not (local_mode or symbol_engine == "local"):
 
             prompt = (
-                f"You are an expert industrial vision detector specializing in ISA-5.1 and engineering symbol recognition for {dt_label} drawings.\n"
-                f"Identify all graphical component symbols present in this drawing image.\n\n"
-                f"SYMBOL TAXONOMY VOCABULARY:\n  {symbol_vocab}\n\n"
-                "FOR EACH DETECTED SYMBOL PROVIDE:\n"
-                "  1. symbol_type: The exact symbol classification from the taxonomy vocabulary.\n"
-                "  2. inferred_tag: Nearest readable tag number/ID (e.g., 26CB9131, PIT-9055, DB-01, EP-01) if visible nearby.\n"
-                "  3. ymin, xmin, ymax, xmax: Normalized bounding box coordinates between 0.0 and 1.0.\n\n"
-                "Return the list of detected symbols in structured JSON format."
+                f"You are a computer vision specialist in ISA-5.1 industrial symbol taxonomy and electrical schematics for {dt_label} drawings.\n\n"
+                "OBJECTIVE: Detect and localize all graphical components and symbols on the drawing canvas.\n\n"
+                f"AUTHORIZED SYMBOL VOCABULARY:\n  {symbol_vocab}\n\n"
+                "MORPHOLOGICAL SYMBOL RECOGNITION RULES:\n"
+                "  • CHECK_VALVE: Two opposing triangles or a directional flap/arrowhead across a seat.\n"
+                "  • GATE_VALVE: Two opposing triangles touching at vertex along a pipeline.\n"
+                "  • BALL_VALVE: Opposing triangles with a solid black/filled circle at center.\n"
+                "  • GLOBE_VALVE: Opposing triangles with an open circle at center.\n"
+                "  • CONTROL_VALVE: Valve body attached to a top pneumatic diaphragm/dome or motor actuator.\n"
+                "  • PSV / SAFETY_VALVE: Angled body with inlet on run and discharge elbow to header with spring bonnet.\n"
+                "  • INST_BUBBLE: Circular bubbles (field mounted = plain circle, control room = horizontal line across circle).\n"
+                "  • STRAINER: Y-shaped branch casing or in-line bucket strainer body (e.g. 26-ST-9002).\n"
+                "  • EQUIPMENT: Major vessels, compressors (trapezoidal profile), pumps (circular impeller casing), heat exchangers.\n\n"
+                "FOR EACH DETECTED SYMBOL:\n"
+                "  1. symbol_type: Must match one authorized classification from the vocabulary.\n"
+                "  2. inferred_tag: Associated adjacent tag label (e.g. 26CB9131, 26-KA-902, 26-ST-9002) if legible.\n"
+                "  3. ymin, xmin, ymax, xmax: Normalized bounding box [0.0 to 1.0] tightly enclosing the symbol icon.\n\n"
+                "Return the full symbol inventory in structured JSON format conforming to RawSymbolList."
             )
 
             try:
@@ -931,17 +950,23 @@ class PipelineRecognitionAgent(BaseAgent):
         # Option B: Full Multimodal VLM Polyline Tracer or Hybrid CV + VLM
         elif not (local_mode or pipeline_engine == "proximity_tracer"):
             prompt = (
-                f"You are an expert topological pipeline and electrical connectivity tracer analyzing a {dt_label} drawing.\n\n"
-                "TASK 1 — TOPOLOGICAL RELATIONSHIPS:\n"
-                "Extract source→target connectivity pairs:\n"
-                "  - MONITORS: Instrument or sensor monitoring a line or equipment.\n"
-                "  - INSTALLED_ON: Valve or fitting installed on a line run.\n"
-                "  - CONNECTS_TO: Pipe, busbar, or cable connecting two pieces of equipment.\n"
-                "  - FEEDS: Distribution panel or switchboard feeding a circuit or breaker.\n"
-                "  - EARTHED_TO: Equipment grounded to an earth bar or earth pit.\n\n"
-                "TASK 2 — GEOMETRY & SHEET GRIDS:\n"
-                "List the border grid sector designations (e.g., A1, B5, C9, D10) and trace any named piping runs or cable routes.\n\n"
-                "Return all findings in structured JSON format."
+                f"You are a principal process piping and electrical systems engineer analyzing topological connectivity on a {dt_label} drawing.\n\n"
+                "TASK 1 — TOPOLOGICAL CONNECTIVITY & STREAM GRAPH GENERATION:\n"
+                "Extract exact [source_tag] -> [target_tag] relationships adhering to physical flow directionality:\n"
+                "  - INSTALLED_ON: In-line valves, check valves, control valves, strainers, or PSVs installed along a specific piping line.\n"
+                "    (Example: '26CB9131' INSTALLED_ON '8\"-PV-26-9035-FC11S-08', 'PSV-9027A' INSTALLED_ON '10\"-VF-43-9027-AS20S-00').\n"
+                "    *CRITICAL*: PSVs are installed on host process piping lines, NEVER arbitrarily mapped to distant vessels or coalescers.\n"
+                "  - RELIEVES_TO: PSV discharge routing to flare or atmospheric relief headers (e.g. 'PSV-9027A' RELIEVES_TO 'HP Flare Header').\n"
+                "  - DRAINS_TO: Equipment drains and low-point purges routing to drain headers (e.g. '26-HA-911' DRAINS_TO 'CLOSED DRAIN').\n"
+                "  - MONITORS: Instrument sensors tapping into process lines or equipment nozzles (e.g. '26-PIT-9077' MONITORS '8\"-PV-26-9035-FC11S-08').\n"
+                "  - CONNECTS_TO: Continuous process piping connecting source equipment nozzles to destination equipment nozzles.\n"
+                "  - FEEDS: Power distribution switchgear, MDBs, or panels feeding electrical branch circuits or loads.\n"
+                "  - EARTHED_TO: Equipment or structures connected via bonding tape to earth bars or earth pits.\n\n"
+                "DIRECTIONALITY CONSTRAINTS:\n"
+                "  - FLARE, HP FLARE, LP FLARE, CLOSED DRAIN, OPEN DRAIN, ATMOSPHERE, VENT, and SUMP are TERMINAL SINKS (must always be targets, never sources feeding process units).\n\n"
+                "TASK 2 — GEOMETRY & SHEET BORDER GRIDS:\n"
+                "Identify border grid sector designations (e.g., A1, B5, C9, D10) and trace continuous polyline coordinates for all major process streams.\n\n"
+                "Return all findings as validated JSON conforming to the RawPipelineList schema."
             )
 
             try:

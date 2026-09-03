@@ -258,25 +258,28 @@ class IngestionAgent(BaseAgent):
         Drawing-type detection is built into the schema and prompt — works for any discipline.
         """
         system_instruction = (
-            "You are a professional engineering document ingestion system. "
-            "Examine the provided engineering drawing image, look closely at the title block, "
-            "sheet headers, and drawing notes. Extract structured metadata accurately. "
-            "Identify the drawing type from the drawing content and title — it may be a P&ID, "
-            "Electrical Layout, Earthing Layout, SLD, HVAC, Structural, or other discipline."
+            "You are a senior engineering document control specialist. "
+            "Examine the engineering drawing canvas, focusing on the title block (bottom-right), "
+            "drawing header frames, revision history tables, and drawing notes blocks. "
+            "Extract complete, standardized metadata across all engineering disciplines."
         )
 
         prompt = (
-            "Extract the following metadata from this engineering drawing. "
-            "Look carefully at the title block (usually bottom-right) and all sheet headers:\n\n"
-            "- drawing_type: One of: PID, PFD, ELECTRICAL_LAYOUT, EARTHING_LAYOUT, SLD, "
-            "HVAC_LAYOUT, STRUCTURAL_LAYOUT, ISOMETRIC, CABLE_SCHEDULE, GENERIC\n"
-            "- discipline: Engineering discipline (Process, Electrical, Mechanical, Civil, etc.)\n"
-            "- drawing_number: Unique document/sheet number from title block\n"
-            "- title: Full title as written on the drawing (e.g., LIGHTING LAYOUT - 1, EARTHING LAYOUT)\n"
-            "- revision: Revision character or number (e.g., 0, 1, A, B)\n"
-            "- client_name: Owner or client name if shown\n"
-            "- page_count: Total sheets if multi-sheet package, otherwise 1\n\n"
-            f"Filename hint (may help identify drawing type): {filename or 'N/A'}"
+            "Dissect the engineering drawing title block and border frames to extract complete document metadata:\n\n"
+            "1. drawing_type: Standardized discipline category:\n"
+            "   - PID: Piping and Instrumentation Diagram\n"
+            "   - PFD: Process Flow Diagram\n"
+            "   - ELECTRICAL_LAYOUT: Lighting, power, cable routing layout\n"
+            "   - EARTHING_LAYOUT: Grounding and lightning protection layout\n"
+            "   - SLD: Single Line Diagram / Electrical schematic\n"
+            "   - HVAC_LAYOUT / STRUCTURAL_LAYOUT / ISOMETRIC / CABLE_SCHEDULE / GENERIC\n\n"
+            "2. drawing_number: Exact official drawing / document number (e.g., 26-00-14-101, DWG-EL-0042-01).\n"
+            "3. title: Full primary title and subtitle as formatted in the title block (e.g., 'LIFT GAS COMPRESSOR SYSTEM', 'LIGHTING LAYOUT - LEVEL 1').\n"
+            "4. discipline: Primary engineering discipline (Process, Piping, Electrical, Instrumentation, Mechanical, Civil/Structural).\n"
+            "5. revision: Latest revision code from the revision block (e.g., '0', '1', 'A', 'B', 'REV 02').\n"
+            "6. client_name: Facility owner, operator, or EPC contractor name from title block logo area.\n"
+            "7. page_count: Total sheet count if part of a multi-sheet drawing set (otherwise 1).\n\n"
+            f"Filename Hint: {filename or 'N/A'}"
         )
 
         try:

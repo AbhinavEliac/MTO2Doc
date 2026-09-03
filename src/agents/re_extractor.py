@@ -180,14 +180,20 @@ class ReExtractorAgent(BaseAgent):
             logger.warning(f"Local mode: No items found in crop for {target}. Using heuristic fallback.")
         else:
             system_instruction = (
-                "You are an engineering scanner focusing on drawing sub-crops. "
-                "Your job is to read blurry or tiny labels next to symbols that were "
-                "missed in the full layout scan."
+                "You are an expert high-magnification engineering visual inspector. "
+                "Your objective is to examine zoomed-in sub-crops of dense P&ID or electrical drawings, "
+                "resolving blurry, dense, or fragmented tags and validating missing in-line symbols and valve types."
             )
             
             prompt = (
-                f"Examine this visual crop. We are missing details for a component suspect of tag '{target}'. "
-                f"Reason: {reason}. Extract the exact tag name, symbol type, description, and spec info."
+                f"Perform high-resolution forensic inspection on this image crop around suspect tag/symbol '{target}'.\n\n"
+                f"Inspection Trigger: {reason}\n\n"
+                "TASKS:\n"
+                "1. Read the complete alphanumeric tag ID without character dropouts (e.g., check for dense valve numbers like 26CB9131 or 26GB9178).\n"
+                "2. Identify the exact ISA symbol type (Gate Valve, Check Valve, Ball Valve, Control Valve, PSV, Instrument Bubble, Strainer).\n"
+                "3. Capture associated physical parameters (line size, ANSI rating class 150#/2500#, set pressure bar(g), or electrical rating).\n"
+                "4. Trace local host line attachment.\n\n"
+                "Return the extracted items conforming to ReExtractionPayload."
             )
             
             if crop_path and os.path.exists(crop_path):
