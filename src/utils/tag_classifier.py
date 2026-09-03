@@ -641,8 +641,8 @@ def classify_paddle_results(
                     found[tag] = _make_item(tag, 'INSTRUMENT_TAG', conf, it_copy)
             item_added = True
 
-        # Inverted Suction Strainers (e.g., 9002 S 26 -> 26-ST-9002 or Note 19 SUCTION STRAINER)
-        for m in re.finditer(r'\b(\d{4})\s*[-/]?\s*S\s*[-/]?\s*(\d{2})\b', t, re.IGNORECASE):
+        # Inverted Suction Strainers (e.g., 9002 S 26 -> 26-ST-9002, 1001 ST 43 -> 43-ST-1001)
+        for m in re.finditer(r'\b(\d{3,5})\s*[-/]?\s*S(?:T)?\s*[-/]?\s*(\d{2,3})\b', t, re.IGNORECASE):
             seq = m.group(1)
             unit = m.group(2)
             st_tag = f"{unit}-ST-{seq}"
@@ -652,11 +652,6 @@ def classify_paddle_results(
                     it_copy["is_reference"] = True
                 found[st_tag] = _make_item(st_tag, 'EQUIPMENT_TAG', conf, it_copy)
                 item_added = True
-
-        if ("SUCTION STRAINER" in t.upper() or "SUCTIONSTRAINER" in t.upper()) and "26-ST-9002" not in found:
-            it_copy = dict(item)
-            found["26-ST-9002"] = _make_item("26-ST-9002", 'EQUIPMENT_TAG', conf, it_copy)
-            item_added = True
 
         # Project-prefix tags (instruments + equipment)
         for m in _PROJECT_TAG_SEARCH.finditer(t):

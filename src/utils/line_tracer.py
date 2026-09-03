@@ -225,8 +225,8 @@ def trace_lines_and_connections(
         # 6. Global drawing equipment/line fallback (guarantees zero orphan instruments)
         if not target_entity:
             if equipment:
-                area_prefix = itag.split('-')[0] if '-' in itag and itag.split('-')[0].isdigit() else "26"
-                same_area_eq = [e.get("tag") for e in equipment if e.get("tag", "").startswith(area_prefix)]
+                area_prefix = itag.split('-')[0] if '-' in itag and itag.split('-')[0].isdigit() else ""
+                same_area_eq = [e.get("tag") for e in equipment if area_prefix and e.get("tag", "").startswith(area_prefix)]
                 target_entity = same_area_eq[0] if same_area_eq else equipment[0].get("tag")
             elif line_items:
                 target_entity = line_items[0].get("tag")

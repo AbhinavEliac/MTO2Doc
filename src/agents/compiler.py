@@ -228,34 +228,43 @@ class CompilerAgent(BaseAgent):
         seen_equip: dict = {}  # canonical key → EquipmentItem (deduplication)
         eq_tags = [t for t in texts if t["classification"] == "EQUIPMENT_TAG"]
         for eq in eq_tags:
-            tag = eq["tag"]
-            # Clean OCR digit noise (e.g. 26-CX-90111 -> 26-CX-9011)
-            tag_clean = re.sub(r'(26-CX-9011)1$', r'\1', tag)
-            canon_key = re.sub(r'^\d{2,3}-', '', tag_clean.upper())
+            tag = eq["tag"].strip()
+            canon_key = re.sub(r'^\d{2,3}-', '', tag.upper())
 
-            # Deduplicate exact canonical keys (e.g. merge bare KA-901 into 26-KA-901)
-            # Parallel trains (HA-911-C01 vs HA-911-C02) and Motor drivers (KA-901-M01) are preserved as distinct items
+            # Generic algorithmic deduplication:
+            # 1. Exact canonical match (e.g. bare KA-901 merged into 26-KA-901)
+            # 2. Single-digit OCR run-on collision (e.g. CX-9011 vs CX-90111 where line size was OCR-concatenated)
+            matched_key = None
             if canon_key in seen_equip:
-                if len(tag_clean) > len(seen_equip[canon_key].tag):
-                    seen_equip[canon_key].tag = tag_clean
+                matched_key = canon_key
+            else:
+                for k in seen_equip:
+                    if (canon_key.startswith(k) and len(canon_key) == len(k) + 1 and canon_key[-1].isdigit()) or \
+                       (k.startswith(canon_key) and len(k) == len(canon_key) + 1 and k[-1].isdigit()):
+                        matched_key = k
+                        break
+
+            if matched_key:
+                if len(tag) > len(seen_equip[matched_key].tag) and len(tag) <= len(seen_equip[matched_key].tag) + 3:
+                    seen_equip[matched_key].tag = tag
                 continue
 
             coords = None
             for sym in symbols:
-                if sym.get("inferred_tag") in (tag, tag_clean):
+                if sym.get("inferred_tag") == tag:
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            code_match = re.search(r'([A-Z]{1,3})(?=-?\d)', tag_clean, re.IGNORECASE)
+            code_match = re.search(r'([A-Z]{1,3})(?=-?\d)', tag, re.IGNORECASE)
             eq_code = code_match.group(1).upper() if code_match else ""
             eq_type = self._ISA_EQUIP_DESC.get(eq_code, "Generic Equipment")
 
             # Detect Motor Drivers (e.g. 26-KA-901-M01)
-            if re.search(r'-M\d{1,2}$', tag_clean, re.IGNORECASE) or tag_clean.endswith('-MOTOR'):
+            if re.search(r'-M\d{1,2}$', tag, re.IGNORECASE) or tag.endswith('-MOTOR'):
                 eq_type = "Motor / Driver"
 
             for sym in symbols:
-                if sym.get("inferred_tag") in (tag, tag_clean) and sym.get("symbol_type"):
+                if sym.get("inferred_tag") == tag and sym.get("symbol_type"):
                     st = sym["symbol_type"].replace('_', ' ').title()
                     if "Equipment" not in st and "Unknown" not in st:
                         eq_type = st
