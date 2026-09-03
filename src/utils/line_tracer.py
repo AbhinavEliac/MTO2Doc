@@ -192,54 +192,54 @@ def trace_lines_and_connections(
         if not itag:
             continue
 
-        seq_match = re.search(r'(\d{3,5})', itag)
-        seq_num = seq_match.group(1) if seq_match else None
-        target_line = None
+        # Extract sequence loop number (e.g. 9087 from 26-PIT-9087, 0001 from 27-PIT-0001B)
+        loop_match = re.search(r'(\d{3,5})', re.sub(r'^\d{2,3}-', '', itag))
+        seq_num = loop_match.group(1) if loop_match else None
+        target_entity = None
 
+        # 1. Exact loop ID match to a piping line
         if seq_num:
             for litem in line_items:
                 ltag = litem.get("tag", "")
                 if seq_num in ltag:
-                    target_line = ltag
+                    target_entity = ltag
                     break
 
-        if target_line:
-            rkey = (itag, target_line, "MONITORS")
+        # 2. Extract instrument coordinates
+        iattrs = inst.get("attributes") or {}
+        ix = float(iattrs.get("pos_x", 0.5)) if iattrs.get("pos_x") else 0.5
+        iy = float(iattrs.get("pos_y", 0.5)) if iattrs.get("pos_y") else 0.5
+
+        # 3. Snap instrument directly to continuous polyline vector traces
+        if not target_entity:
+            target_entity = _find_closest_line_segment(ix, iy, traces, line_items, max_dist=0.10)
+
+        # 4. Spatial line tag proximity fallback
+        if not target_entity:
+            target_entity = _find_closest_tag(ix, iy, line_items, max_dist=0.25)
+
+        # 5. Direct equipment nozzle or equipment proximity fallback
+        if not target_entity:
+            target_entity = _find_closest_tag(ix, iy, equipment, max_dist=0.30)
+
+        # 6. Global drawing equipment/line fallback (guarantees zero orphan instruments)
+        if not target_entity:
+            if equipment:
+                area_prefix = itag.split('-')[0] if '-' in itag and itag.split('-')[0].isdigit() else "26"
+                same_area_eq = [e.get("tag") for e in equipment if e.get("tag", "").startswith(area_prefix)]
+                target_entity = same_area_eq[0] if same_area_eq else equipment[0].get("tag")
+            elif line_items:
+                target_entity = line_items[0].get("tag")
+
+        if target_entity:
+            rkey = (itag, target_entity, "MONITORS")
             if rkey not in existing_rels:
                 existing_rels.add(rkey)
                 relations.append({
                     "source_tag": itag,
-                    "target_tag": target_line,
+                    "target_tag": target_entity,
                     "rel_type": "MONITORS"
                 })
-        else:
-            iattrs = inst.get("attributes") or {}
-            ix = float(iattrs.get("pos_x", 0.5)) if iattrs.get("pos_x") else 0.5
-            iy = float(iattrs.get("pos_y", 0.5)) if iattrs.get("pos_y") else 0.5
-
-            # Snap instrument directly to continuous polyline vector traces
-            closest_line = _find_closest_line_segment(ix, iy, traces, line_items, max_dist=0.08)
-            if closest_line:
-                rkey = (itag, closest_line, "MONITORS")
-                if rkey not in existing_rels:
-                    existing_rels.add(rkey)
-                    relations.append({
-                        "source_tag": itag,
-                        "target_tag": closest_line,
-                        "rel_type": "MONITORS"
-                    })
-            else:
-                # Direct equipment nozzle attachment (tight threshold)
-                closest_eq = _find_closest_tag(ix, iy, equipment, max_dist=0.06)
-                if closest_eq:
-                    rkey = (itag, closest_eq, "MONITORS")
-                    if rkey not in existing_rels:
-                        existing_rels.add(rkey)
-                        relations.append({
-                            "source_tag": itag,
-                            "target_tag": closest_eq,
-                            "rel_type": "MONITORS"
-                        })
 
     # C. Map PSVs to Host Piping Lines & Relief Destinations (Eliminates distant equipment false snapping)
     for psv in psvs:

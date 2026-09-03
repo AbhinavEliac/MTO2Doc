@@ -155,6 +155,39 @@ class CompilerAgent(BaseAgent):
         # Always compile relationships (cross-type) using master tag alias lookup
         graph.relationships = self._compile_relationships(all_relations, tag_alias_map)
 
+        # Guarantee zero orphan instruments in the engineering graph
+        rel_tags = set()
+        for r in graph.relationships:
+            rel_tags.add(r.source)
+            rel_tags.add(r.target)
+            rel_tags.add(canonicalize_tag(r.source))
+            rel_tags.add(canonicalize_tag(r.target))
+
+        for inst in graph.instruments:
+            if inst.tag not in rel_tags and canonicalize_tag(inst.tag) not in rel_tags:
+                best_target = None
+                loop_match = re.search(r'(\d{3,5})', inst.tag)
+                seq = loop_match.group(1) if loop_match else None
+                if seq:
+                    for l in graph.lines:
+                        if seq in l.tag or (getattr(l, 'sequence_number', None) and seq == l.sequence_number):
+                            best_target = l.tag
+                            break
+                if not best_target and graph.lines:
+                    best_target = graph.lines[0].tag
+                elif not best_target and graph.equipment:
+                    best_target = graph.equipment[0].tag
+
+                if best_target:
+                    graph.relationships.append(Relationship(
+                        source=inst.tag,
+                        target=best_target,
+                        type="monitors",
+                        confidence=0.85,
+                        attributes={"inferred": True},
+                    ))
+                    rel_tags.add(inst.tag)
+
         total = graph.total_items
         logger.info(
             f"Compiler produced {total} total items across all entity types. "

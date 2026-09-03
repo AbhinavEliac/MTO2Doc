@@ -67,10 +67,14 @@ class ValidationAgent(BaseAgent):
                 })
 
         # Rule 3: Check for orphan instruments (no connection/relationships)
+        from src.utils.tag_classifier import canonicalize_tag
         for inst in graph.instruments:
             has_relation = False
+            inst_canon = canonicalize_tag(inst.tag)
             for rel in graph.relationships:
-                if rel.source == inst.tag or rel.target == inst.tag:
+                if (rel.source == inst.tag or rel.target == inst.tag or
+                    canonicalize_tag(rel.source) == inst_canon or
+                    canonicalize_tag(rel.target) == inst_canon):
                     has_relation = True
                     break
             if not has_relation:
