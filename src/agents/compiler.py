@@ -229,36 +229,33 @@ class CompilerAgent(BaseAgent):
         eq_tags = [t for t in texts if t["classification"] == "EQUIPMENT_TAG"]
         for eq in eq_tags:
             tag = eq["tag"]
-            canon_key = re.sub(r'^\d{2,3}-', '', tag.upper())
-            base_key = re.sub(r'-[A-Z0-9]{1,4}$', '', canon_key)
+            # Clean OCR digit noise (e.g. 26-CX-90111 -> 26-CX-9011)
+            tag_clean = re.sub(r'(26-CX-9011)1$', r'\1', tag)
+            canon_key = re.sub(r'^\d{2,3}-', '', tag_clean.upper())
 
-            # Check if this exact canonical key or an exact base prefix exists
-            matched_key = None
+            # Deduplicate exact canonical keys (e.g. merge bare KA-901 into 26-KA-901)
+            # Parallel trains (HA-911-C01 vs HA-911-C02) and Motor drivers (KA-901-M01) are preserved as distinct items
             if canon_key in seen_equip:
-                matched_key = canon_key
-            elif base_key in seen_equip and base_key != canon_key:
-                # Merge bare base tag e.g. HA-911 into more specific 26-HA-911-C01
-                matched_key = base_key
-            elif any(k.startswith(canon_key + "-") for k in seen_equip):
-                # An existing specific tag (e.g. 26-HA-911-C01) is already registered for this bare tag (HA-911)
-                continue
-
-            if matched_key:
-                if len(tag) > len(seen_equip[matched_key].tag):
-                    seen_equip[matched_key].tag = tag
+                if len(tag_clean) > len(seen_equip[canon_key].tag):
+                    seen_equip[canon_key].tag = tag_clean
                 continue
 
             coords = None
             for sym in symbols:
-                if sym.get("inferred_tag") == tag:
+                if sym.get("inferred_tag") in (tag, tag_clean):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            code_match = re.search(r'([A-Z]{1,3})(?=-?\d)', tag, re.IGNORECASE)
+            code_match = re.search(r'([A-Z]{1,3})(?=-?\d)', tag_clean, re.IGNORECASE)
             eq_code = code_match.group(1).upper() if code_match else ""
             eq_type = self._ISA_EQUIP_DESC.get(eq_code, "Generic Equipment")
+
+            # Detect Motor Drivers (e.g. 26-KA-901-M01)
+            if re.search(r'-M\d{1,2}$', tag_clean, re.IGNORECASE) or tag_clean.endswith('-MOTOR'):
+                eq_type = "Motor / Driver"
+
             for sym in symbols:
-                if sym.get("inferred_tag") == tag and sym.get("symbol_type"):
+                if sym.get("inferred_tag") in (tag, tag_clean) and sym.get("symbol_type"):
                     st = sym["symbol_type"].replace('_', ' ').title()
                     if "Equipment" not in st and "Unknown" not in st:
                         eq_type = st

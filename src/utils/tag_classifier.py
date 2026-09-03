@@ -585,13 +585,17 @@ def classify_paddle_results(
             if not tag or len(tag) < 4:
                 continue
 
-            # Guard against equipment tags without size prefix (e.g. HA-911-C01, KA-902-M01, TK-101-A)
+            # Guard against equipment tags without size prefix (e.g. HA-911-C01, 26-KA-901-M01, 26-ST-9002)
             parts = tag.split('-')
-            has_size = bool(parts and (re.match(r'^\d', parts[0]) or '"' in parts[0] or "'" in parts[0] or 'MM' in parts[0] or 'DN' in parts[0]))
-            if not has_size and len(parts) >= 2:
-                prefix = parts[0]
-                if prefix in _EQUIP_PREFIX_ALLOWLIST:
-                    continue  # Route to equipment pattern search instead
+            has_explicit_size = bool(parts and ('"' in parts[0] or "'" in parts[0] or '/' in parts[0] or 'MM' in parts[0] or 'DN' in parts[0]))
+            if len(parts) >= 2:
+                # Bare equipment e.g. HA-911-C01, KA-902, TK-101
+                if parts[0] in (_EQUIP_PREFIX_ALLOWLIST | _EQUIPMENT_CODES):
+                    continue
+                # Area-prefixed equipment e.g. 26-KA-901-M01, 26-HA-911-C01, 26-ST-9002, 26-KZ-901
+                if len(parts) >= 3 and parts[0].isdigit() and len(parts[0]) == 2 and not has_explicit_size:
+                    if parts[1] in (_EQUIP_PREFIX_ALLOWLIST | _EQUIPMENT_CODES):
+                        continue
 
             flag_reason = None
             tag_conf = conf
@@ -637,7 +641,7 @@ def classify_paddle_results(
                     found[tag] = _make_item(tag, 'INSTRUMENT_TAG', conf, it_copy)
             item_added = True
 
-        # Inverted Suction Strainers (e.g., 9002 S 26 -> 26-ST-9002)
+        # Inverted Suction Strainers (e.g., 9002 S 26 -> 26-ST-9002 or Note 19 SUCTION STRAINER)
         for m in re.finditer(r'\b(\d{4})\s*[-/]?\s*S\s*[-/]?\s*(\d{2})\b', t, re.IGNORECASE):
             seq = m.group(1)
             unit = m.group(2)
@@ -648,6 +652,11 @@ def classify_paddle_results(
                     it_copy["is_reference"] = True
                 found[st_tag] = _make_item(st_tag, 'EQUIPMENT_TAG', conf, it_copy)
                 item_added = True
+
+        if ("SUCTION STRAINER" in t.upper() or "SUCTIONSTRAINER" in t.upper()) and "26-ST-9002" not in found:
+            it_copy = dict(item)
+            found["26-ST-9002"] = _make_item("26-ST-9002", 'EQUIPMENT_TAG', conf, it_copy)
+            item_added = True
 
         # Project-prefix tags (instruments + equipment)
         for m in _PROJECT_TAG_SEARCH.finditer(t):
