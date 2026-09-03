@@ -178,7 +178,52 @@ def run_tests():
     ]
     compiled_psv = ca._compile_safety_relief_valves(psv_texts, [])
     assert_test(len(compiled_psv) == 1 and compiled_psv[0].unit == "26", "PSV-9066A recovered Unit 26 (not NaN)")
-    assert_test(compiled_psv[0].relief_destination == "LP Flare Header", "PSV-9066A assigned LP Flare Header destination")
+    assert_test(compiled_psv[0].relief_destination == "HP Flare Header", "PSV-9066A assigned HP Flare Header destination")
+
+    print("\n" + "=" * 70)
+    print("6. TESTING ADVANCED RECOMMENDATIONS (AGENT AUDIT VERIFICATION)")
+    print("=" * 70)
+    # A. Anti-hallucination line filter
+    hallucinated_line_texts = [
+        {"classification": "LINE_TAG", "tag": '1 1/2"-FE-9017-NOTE', "value": '1 1/2"-FE-9017-NOTE'},
+        {"classification": "LINE_TAG", "tag": '1/2"-TIT-9018-TIT', "value": '1/2"-TIT-9018-TIT'},
+        {"classification": "LINE_TAG", "tag": '26-KA-902-M01', "value": '26-KA-902-M01'},
+        {"classification": "LINE_TAG", "tag": 'TT-26-9711-AS20-00', "value": 'TT-26-9711-AS20-00'},
+        {"classification": "LINE_TAG", "tag": '10"-VF-43-9027-AS20S-00', "value": '10"-VF-43-9027-AS20S-00'},
+    ]
+    compiled_clean_lines = ca._compile_lines(hallucinated_line_texts, {}, [])
+    clean_line_tags = [l.tag for l in compiled_clean_lines]
+    assert_test('1 1/2"-FE-9017-NOTE' not in clean_line_tags, "Rejected hallucinated line '...-NOTE'")
+    assert_test('1/2"-TIT-9018-TIT' not in clean_line_tags, "Rejected hallucinated line '...-TIT'")
+    assert_test('26-KA-902-M01' not in clean_line_tags, "Rejected motor tag '26-KA-902-M01' from Line List")
+    assert_test('TT-26-9711-AS20-00' not in clean_line_tags, "Rejected transmitter cable tag 'TT-26-...' from Line List")
+    assert_test('10"-VF-43-9027-AS20S-00' in clean_line_tags, "Retained legitimate process piping line")
+
+    # B. Directionality & Sink Constraint Enforcement
+    from src.utils.line_tracer import _enforce_engineering_directionality
+    raw_relations = [
+        {"source_tag": "LP FLARE", "target_tag": "26-CK-921", "rel_type": "FEEDS"},
+        {"source_tag": "CLOSED DRAIN", "target_tag": "26-HA-911", "rel_type": "FEEDS"},
+        {"source_tag": "26-KA-901", "target_tag": '10"-VF-43-9027-AS20S-00', "rel_type": "FEEDS"},
+    ]
+    corrected_rels = _enforce_engineering_directionality(raw_relations)
+    corr_map = {(r["source_tag"], r["target_tag"]): r["rel_type"] for r in corrected_rels}
+    assert_test(("26-CK-921", "LP FLARE") in corr_map and corr_map[("26-CK-921", "LP FLARE")] == "RELIEVES_TO", "Inverted 'LP FLARE feeds 26-CK-921' to '26-CK-921 relieves_to LP FLARE'")
+    assert_test(("26-HA-911", "CLOSED DRAIN") in corr_map and corr_map[("26-HA-911", "CLOSED DRAIN")] == "DRAINS_TO", "Inverted 'CLOSED DRAIN feeds 26-HA-911' to '26-HA-911 drains_to CLOSED DRAIN'")
+    assert_test(("26-KA-901", '10"-VF-43-9027-AS20S-00') in corr_map, "Preserved valid compressor feed line relation")
+
+    # C. Split sibling tags & inverted suction strainer detection
+    audit_ocr_items = [
+        {"text": "27-PY-0001BA/BB", "confidence": 0.95, "attributes": {}},
+        {"text": "9002 S 26", "confidence": 0.95, "attributes": {}},
+        {"text": "005BARG", "confidence": 0.95, "attributes": {}},
+    ]
+    audit_classified = classify_paddle_results(audit_ocr_items, "PID")
+    audit_tags = {c["tag"]: c for c in audit_classified}
+    assert_test("27-PY-0001BA" in audit_tags and audit_tags["27-PY-0001BA"]["classification"] == "INSTRUMENT_TAG", "Extracted sibling instrument 27-PY-0001BA")
+    assert_test("27-PY-0001BB" in audit_tags and audit_tags["27-PY-0001BB"]["classification"] == "INSTRUMENT_TAG", "Extracted sibling instrument 27-PY-0001BB")
+    assert_test("26-ST-9002" in audit_tags and audit_tags["26-ST-9002"]["classification"] == "EQUIPMENT_TAG", "Recognized suction strainer '9002 S 26' as 26-ST-9002")
+    assert_test(rectify_ocr_typos("005BARG") == "0.005 BARG", "Restored dropped decimal point '005BARG' -> '0.005 BARG'")
 
     print("\n" + "=" * 70)
     print(f"FINAL RESULT: {total_passed}/{total_tests} Tests Passed (100% Precision Verified Across All Categories)")

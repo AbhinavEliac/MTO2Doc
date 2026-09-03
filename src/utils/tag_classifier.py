@@ -610,6 +610,36 @@ def classify_paddle_results(
                                         flag_reason=flag_reason)
                 item_added = True
 
+        # Check for operational reference context (e.g. FROM ..., TO ..., TIE-IN TO ...)
+        is_ref_context = bool(re.search(r'\b(?:FROM|TO|TIE-IN|CONTINUED\s+ON|SEE\s+DWG|REF\s+DWG)\b', t, re.IGNORECASE))
+
+        # Split-suffix sibling instrument tags (e.g., 27-PY-0001BA/BB -> 27-PY-0001BA, 27-PY-0001BB)
+        for m in re.finditer(r'\b(\d{2}-[A-Z]{2,4}-\d{3,5})([A-Z]{1,2})/([A-Z]{1,2})\b', t, re.IGNORECASE):
+            base_prefix = m.group(1).upper()
+            suf1 = m.group(2).upper()
+            suf2 = m.group(3).upper()
+            tag1 = f"{base_prefix}{suf1}"
+            tag2 = f"{base_prefix}{suf2}"
+            for tag in (tag1, tag2):
+                if tag not in found:
+                    it_copy = dict(item)
+                    if is_ref_context:
+                        it_copy["is_reference"] = True
+                    found[tag] = _make_item(tag, 'INSTRUMENT_TAG', conf, it_copy)
+            item_added = True
+
+        # Inverted Suction Strainers (e.g., 9002 S 26 -> 26-ST-9002)
+        for m in re.finditer(r'\b(\d{4})\s*[-/]?\s*S\s*[-/]?\s*(\d{2})\b', t, re.IGNORECASE):
+            seq = m.group(1)
+            unit = m.group(2)
+            st_tag = f"{unit}-ST-{seq}"
+            if st_tag not in found:
+                it_copy = dict(item)
+                if is_ref_context:
+                    it_copy["is_reference"] = True
+                found[st_tag] = _make_item(st_tag, 'EQUIPMENT_TAG', conf, it_copy)
+                item_added = True
+
         # Project-prefix tags (instruments + equipment)
         for m in _PROJECT_TAG_SEARCH.finditer(t):
             full_tag = m.group(1).upper()
@@ -639,7 +669,10 @@ def classify_paddle_results(
                 cat = 'EQUIPMENT_TAG'
 
             if full_tag not in found:
-                found[full_tag] = _make_item(full_tag, cat, conf, item)
+                it_copy = dict(item)
+                if is_ref_context:
+                    it_copy["is_reference"] = True
+                found[full_tag] = _make_item(full_tag, cat, conf, it_copy)
                 item_added = True
 
         # Bare instrument tags — Defect 3: setpoint negative-context guard for 3-digit setpoints

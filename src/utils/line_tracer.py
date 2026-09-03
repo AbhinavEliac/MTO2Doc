@@ -333,6 +333,9 @@ def trace_lines_and_connections(
                         "rel_type": "EARTHED_TO"
                     })
 
+    # ── Engineering Flow Directionality & Sink Constraint Enforcement ─────────
+    relations = _enforce_engineering_directionality(relations)
+
     logger.info(
         f"line_tracer: Extracted {len(traces)} line traces & {len(relations)} topological relations."
     )
@@ -344,6 +347,51 @@ def trace_lines_and_connections(
             "sheet_grids": sheet_grids,
         }
     }
+
+
+def _enforce_engineering_directionality(relations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Enforces process engineering topological constraints:
+    1. Nodes designated as FLARE, ATMOSPHERE, DRAIN, SUMP, SEWER, VENT are terminal SINKS.
+       They cannot have outgoing 'feeds' or 'connects_to' edges to process equipment/valves.
+    2. Inverts inverted edges (e.g., 'LP FLARE feeds 26-CK-921' -> '26-CK-921 relieves_to LP FLARE').
+    """
+    SINKS = (
+        'FLARE', 'HP FLARE', 'LP FLARE', 'HP_FLARE', 'LP_FLARE',
+        'DRAIN', 'CLOSED DRAIN', 'OPEN DRAIN', 'CLOSED_DRAIN', 'OPEN_DRAIN',
+        'ATMOSPHERE', 'SUMP', 'SEWER', 'VENT', 'SCRAP'
+    )
+    corrected = []
+    seen = set()
+
+    for r in relations:
+        src = str(r.get("source_tag", "")).strip()
+        tgt = str(r.get("target_tag", "")).strip()
+        rtype = str(r.get("rel_type", "CONNECTS_TO")).upper()
+
+        src_upper = src.upper()
+        tgt_upper = tgt.upper()
+
+        is_src_sink = any(s in src_upper for s in SINKS)
+        is_tgt_sink = any(s in tgt_upper for s in SINKS)
+
+        if is_src_sink and not is_tgt_sink:
+            # Invert inverted sink edge
+            new_rel_type = "RELIEVES_TO" if ("FLARE" in src_upper or "VENT" in src_upper) else "DRAINS_TO"
+            r_corr = {
+                "source_tag": tgt,
+                "target_tag": src,
+                "rel_type": new_rel_type
+            }
+        else:
+            r_corr = r
+
+        key = (r_corr["source_tag"], r_corr["target_tag"], r_corr["rel_type"])
+        if key not in seen:
+            seen.add(key)
+            corrected.append(r_corr)
+
+    return corrected
 
 
 def _dist_to_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:

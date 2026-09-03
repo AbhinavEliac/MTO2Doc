@@ -69,6 +69,10 @@ def rectify_ocr_typos(text: str) -> str:
     cleaned = re.sub(r'\b(AS\d{2})5\b', r'\g<1>S', cleaned)
     cleaned = re.sub(r'\b(AC\d{2})5\b', r'\g<1>S', cleaned)
 
+    # 5. Fix dropped decimal points in low pressure ratings: 005BARG -> 0.005 BARG, 005 BARG -> 0.005 BARG
+    cleaned = re.sub(r'(?<![\.\d])00(\d+)\s*(BARG|PSIG|BAR)\b', r'0.00\1 \2', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'(?<![\.\d])0([1-9]\d)\s*(BARG|PSIG|BAR)\b', r'0.\1 \2', cleaned, flags=re.IGNORECASE)
+
     return cleaned
 
 

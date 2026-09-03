@@ -262,8 +262,21 @@ class CompilerAgent(BaseAgent):
         compiled = []
         line_tags = [t for t in texts if t["classification"] == "LINE_TAG"]
 
+        # Anti-hallucination & Schema Validation Tokens
+        INVALID_LINE_TOKENS = {
+            'NOTE', 'TIT', 'PIT', 'LIT', 'FIT', 'PDI', 'PDT', 'PT', 'TT', 'FT', 'LT',
+            'REV', 'DWG', 'SHT', 'DETAIL', 'TYP', 'EL', 'M01', 'M02', 'M03', 'MOTOR'
+        }
+
         for lt in line_tags:
             tag = lt["tag"]
+
+            # ── Pre-Export Schema Validator & Anti-Hallucination Filter ────────
+            # 1. Reject motor tags or electrical cable circuits (e.g., 26-KA-902-M01, TT-26-9711-AS20-00)
+            tag_upper = tag.upper()
+            if re.search(r'-(?:M\d{2}|C0\d)$', tag_upper) or tag_upper.startswith(('TT-', 'PT-', 'LT-', 'FT-', 'TIT-', 'PIT-', 'LIT-', 'FIT-')):
+                continue
+
             # Intelligently split tag and detect whether size prefix is present
             parts = [p.strip() for p in tag.split('-') if p.strip()]
 
@@ -305,6 +318,14 @@ class CompilerAgent(BaseAgent):
                 sequence = rem[2]
                 spec = rem[3]
                 insulation = rem[4]
+
+            # 2. Reject if service or spec was force-fitted with descriptive/note tokens (e.g. ...-NOTE, ...-TIT)
+            if service.upper() in INVALID_LINE_TOKENS or spec.upper() in INVALID_LINE_TOKENS:
+                continue
+
+            # 3. Reject if service code is not a clean alphabetic fluid/system descriptor
+            if not re.match(r'^[A-Z]{1,4}$', service.upper()):
+                continue
 
             path_coords = None
             for trace in geom.get("traces", []):
@@ -783,16 +804,22 @@ class CompilerAgent(BaseAgent):
                 or "N/A"
             )
 
-            # Auto-detect relief destination from notes/service callout (e.g. FLARE / CLOSED DRAIN)
+            # Auto-detect relief destination from notes/service callout (e.g. HP FLARE vs LP FLARE)
             destination = attrs.get("relief_destination")
             if not destination:
                 for t in texts:
-                    val = t.get("value", "")
-                    if "FLARE" in val.upper() or "DRAIN" in val.upper():
-                        destination = val.strip()
+                    val = t.get("value", "").upper()
+                    if "HP FLARE" in val or "HP-FLARE" in val or "HIGH PRESSURE FLARE" in val:
+                        destination = "HP Flare Header"
+                        break
+                    elif "LP FLARE" in val or "LP-FLARE" in val or "LOW PRESSURE FLARE" in val:
+                        destination = "LP Flare Header"
+                        break
+                    elif "CLOSED DRAIN" in val or "DRAIN" in val:
+                        destination = "Closed Drain Header"
                         break
             if not destination:
-                destination = "LP Flare Header"
+                destination = "HP Flare Header"
 
             compiled.append(SafetyReliefValveItem(
                 tag=tag,
