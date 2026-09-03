@@ -239,13 +239,21 @@ class CompilerAgent(BaseAgent):
                 matched_key = canon_key
             else:
                 for k in seen_equip:
+                    # Single-digit OCR run-on collision (e.g. CX-9011 vs CX-90111)
                     if (canon_key.startswith(k) and len(canon_key) == len(k) + 1 and canon_key[-1].isdigit()) or \
                        (k.startswith(canon_key) and len(k) == len(canon_key) + 1 and k[-1].isdigit()):
                         matched_key = k
+                        # Keep the shorter, clean base tag
+                        if len(canon_key) < len(k):
+                            item_obj = seen_equip.pop(k)
+                            item_obj.tag = tag
+                            seen_equip[canon_key] = item_obj
+                            matched_key = canon_key
                         break
 
             if matched_key:
-                if len(tag) > len(seen_equip[matched_key].tag) and len(tag) <= len(seen_equip[matched_key].tag) + 3:
+                # Upgrade bare tag to area-prefixed tag if base key matches exactly (e.g. KA-901 -> 26-KA-901)
+                if '-' in tag and tag.split('-')[0].isdigit() and not ('-' in seen_equip[matched_key].tag and seen_equip[matched_key].tag.split('-')[0].isdigit()):
                     seen_equip[matched_key].tag = tag
                 continue
 
@@ -663,7 +671,7 @@ class CompilerAgent(BaseAgent):
                 v_type = "Gate Valve"
             elif re.search(r'(?:GL|GLOBE|GLV)', tag_upper):
                 v_type = "Globe Valve"
-            elif re.search(r'(?:CB|CK|CHECK|CV(?=-?\d))', tag_upper):
+            elif re.search(r'(?:CB|CK|CH|CHECK|CV(?=-?\d))', tag_upper):
                 v_type = "Check Valve"
             elif re.search(r'(?:NV|ND|NEEDLE)', tag_upper):
                 v_type = "Needle Valve"
