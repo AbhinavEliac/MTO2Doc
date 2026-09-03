@@ -43,6 +43,7 @@ rasterized/
 temp/
 tmp/
 runs/
+pid_stuff/
 *.pt
 
 
