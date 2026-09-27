@@ -168,24 +168,30 @@ _SERVICE_CODE_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Valve tags (ISA 5.1 comprehensive):
+# Valve tags (ISA 5.1 comprehensive + synthetic P&ID / schematic tags):
 #   Dense format:    26CB9131, 26GB9178  (no separator)
 #   Separated:       26-CB-9131A, 26-GB-9178
 #   Named control valves: HV-101, XV-201, FV-9076, PCV-9044, SDV-201
 #   Block valves: BV-101, NV-201, GV-101, BFV-201
+#   Synthetic / Vendor prefixes: QR-70427, GH-83714, KL-21519, EF-96470, ST-93705, CS-97
 _VALVE_SEARCH = re.compile(
     r'\b('
     r'\d{2}-?[A-Z]{2}-?\d{4,6}[A-Z]?'                           # 26CB9131, 26-CB-9131A
-    r'|(?:HV|XV|CV|PCV|FCV|TCV|LCV|EV|MOV|SDV|BDV|FV|UV|TV|LV|AV|ZV)[-–]\d{2,5}[A-Z]?'  # HV-101, SDV-201
-    r'|(?:BV|NV|GV|BFV|SBV|NGV|PLV|RV|PRV)[-–]\d{2,5}[A-Z]?'  # BV-101, NV-201
+    r'|(?:HV|XV|CV|PCV|FCV|TCV|LCV|EV|MOV|SDV|BDV|FV|UV|TV|LV|AV|ZV|RV|SV)[-–]\d{2,6}[A-Z]?'  # HV-101, SDV-201
+    r'|(?:BV|NV|GV|BFV|SBV|NGV|PLV|PRV)[-–]\d{2,6}[A-Z]?'      # BV-101, NV-201
+    r'|(?:QR|GH|KL|EF|ST|CS)[-–]\d{2,6}[A-Z]?'                  # Synthetic P&ID valve tags
     r'|\bV-\d{3,5}[A-Z]?'                                         # V-101
+    r'|(?:(?:LOADING|SUCTION|PURGE|VENT|DISCHARGE|RECYCLE|BYPASS|RELIEF|BLOWDOWN|CHECK|MAINLINE(?:\s+BLOCK)?)\s+VALVE)'  # Schematic valve callouts
     r')\b',
     re.IGNORECASE
 )
 
-# Line tags: 8"-PV-26-9035-FC11S-08, 12mm-PV-26-9116-FD70X-00, 3"-VA-26-9121-AC21-00, PV-26-9035-FC11S-08
+# Line tags: 8"-PV-26-9035-FC11S-08, 12mm-PV-26-9116-FD70X-00, 3"-VA-26-9121-AC21-00, 4"-TA-4424, PV-26-9035-FC11S-08
 _LINE_SEARCH = re.compile(
-    r'((?:\d+(?:[/\.]\d+)?(?:["\']|mm|DN)?\s*[-–]?\s*)?[A-Z]{1,4}\s*[-–]\s*(?:\d{2,4}\s*[-–]\s*)?\d{3,5}'
+    r'((?:\d+(?:[/\.]\d+)?(?:["\']|mm|DN)\s*[-–]?\s*)[A-Z]{1,4}\s*[-–]\s*(?:\d{2,4}\s*[-–]\s*)?\d{3,5}'
+    r'(?:\s*[-–]\s*[A-Z0-9]{2,8}(?:\s*[-–]\s*[A-Z0-9]{1,8})?)?'
+    r'|'
+    r'[A-Z]{1,4}\s*[-–]\s*(?:\d{2,4}\s*[-–]\s*)?\d{3,5}'
     r'\s*[-–]\s*[A-Z0-9]{2,8}(?:\s*[-–]\s*[A-Z0-9]{1,8})?)',
     re.IGNORECASE
 )

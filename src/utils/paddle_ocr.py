@@ -133,13 +133,19 @@ def run_pdf_text_extraction(pdf_path: str) -> List[Dict[str, Any]]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _get_easyocr():
-    """Lazy-load EasyOCR reader with English model."""
+    """Lazy-load EasyOCR reader with English model (CUDA GPU accelerated if available)."""
     global _easyocr_reader
     if _easyocr_reader is None:
         import easyocr
-        logger.info("Initializing EasyOCR reader (en)...")
-        _easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-        logger.info("EasyOCR initialized successfully.")
+        use_gpu = False
+        try:
+            import torch
+            use_gpu = torch.cuda.is_available()
+        except Exception:
+            pass
+        logger.info(f"Initializing EasyOCR reader (en, gpu={use_gpu})...")
+        _easyocr_reader = easyocr.Reader(['en'], gpu=use_gpu, verbose=False)
+        logger.info(f"EasyOCR initialized successfully (gpu={use_gpu}).")
     return _easyocr_reader
 
 
@@ -317,16 +323,21 @@ def run_paddle_ocr(image_path: str) -> List[Dict[str, Any]]:
 
     Returns list of dicts with: text, confidence, bbox, center_x, center_y.
     """
-    # ── Check for original PDF vector text first ──────────────────────────────
+    # ── Check for original matching PDF vector text if applicable ───────────
     try:
-        parent_dir = os.path.dirname(os.path.dirname(image_path))
-        if os.path.exists(parent_dir):
-            pdf_candidates = [f for f in os.listdir(parent_dir) if f.lower().endswith(".pdf")]
-            if pdf_candidates:
-                pdf_path = os.path.join(parent_dir, pdf_candidates[0])
-                pdf_items = run_pdf_text_extraction(pdf_path)
+        if image_path.lower().endswith('.pdf'):
+            pdf_items = run_pdf_text_extraction(image_path)
+            if len(pdf_items) > 20:
+                logger.info(f"run_paddle_ocr: PyMuPDF vector text layer extracted {len(pdf_items)} items from '{image_path}'.")
+                return pdf_items
+        else:
+            # Check if there is an exact matching PDF in the same directory
+            base_stem = os.path.splitext(os.path.basename(image_path))[0].replace('_preprocessed', '')
+            matching_pdf = os.path.join(os.path.dirname(image_path), f"{base_stem}.pdf")
+            if os.path.exists(matching_pdf):
+                pdf_items = run_pdf_text_extraction(matching_pdf)
                 if len(pdf_items) > 20:
-                    logger.info(f"run_paddle_ocr: PyMuPDF vector text layer extracted {len(pdf_items)} items from '{pdf_candidates[0]}'.")
+                    logger.info(f"run_paddle_ocr: PyMuPDF vector text layer extracted {len(pdf_items)} items from matching '{base_stem}.pdf'.")
                     return pdf_items
     except Exception as pdf_chk_err:
         logger.warning(f"PyMuPDF vector text check warning: {pdf_chk_err}")

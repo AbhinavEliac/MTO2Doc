@@ -201,6 +201,7 @@ st.sidebar.markdown("### 🔤 Layer 1: OCR Reading Layer")
 ocr_option = st.sidebar.selectbox(
     "1st Layer: OCR Text Engine",
     options=[
+        "EasyOCR (Local / Offline — Images & PDFs)",
         "PyMuPDF Vector Text (Local / Offline)",
         "PaddleOCR (Local / Offline)",
         "Pathnovo ISA 5.1 Extraction Engine (High Accuracy)",
@@ -211,9 +212,10 @@ ocr_option = st.sidebar.selectbox(
         "Qwen 3.7-VL / OpenRouter (Online)",
     ],
     index=0,
-    help="Select the 1st layer OCR engine. PyMuPDF extracts 100% accurate vector text layer instantly.",
+    help="Select the 1st layer OCR engine. EasyOCR works reliably offline on GPU/CPU for both raster images (PNG/JPG) and PDFs.",
 )
 ocr_engine_map = {
+    "EasyOCR (Local / Offline — Images & PDFs)": "easyocr",
     "PyMuPDF Vector Text (Local / Offline)": "pdf_text",
     "PaddleOCR (Local / Offline)": "paddle",
     "Pathnovo ISA 5.1 Extraction Engine (High Accuracy)": "pathnovo_api",
@@ -223,7 +225,7 @@ ocr_engine_map = {
     "Qwen 2.5-VL / Vision API (Online)": "qwen_ocr",
     "Qwen 3.7-VL / OpenRouter (Online)": "qwen_37_ocr",
 }
-ocr_engine = ocr_engine_map.get(ocr_option, "pdf_text")
+ocr_engine = ocr_engine_map.get(ocr_option, "easyocr")
 
 st.sidebar.markdown("### 🧠 Layer 2: Reasoning & Refinement Engine")
 reasoning_option = st.sidebar.selectbox(
@@ -503,7 +505,7 @@ with tab_main_dashboard:
             "llm_api_key": llm_api_key,
             "llm_base_url": llm_base_url,
             "use_mocks": use_mocks,
-            "local_mode": local_mode or (reasoning_engine == "rule_based" and ocr_engine in ("paddle", "pdf_text")),
+            "local_mode": local_mode or (reasoning_engine == "rule_based" and ocr_engine in ("paddle", "pdf_text", "easyocr")),
             "re_extracted_targets": [],
             "yolo_weights_path": yolo_weights_path,
             "yolo_conf": yolo_conf,
