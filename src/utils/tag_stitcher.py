@@ -49,7 +49,7 @@ _VALVE_PREFIX_PATTERN = re.compile(
 
 def rectify_ocr_typos(text: str) -> str:
     """
-    Fixes common engineering OCR character misrecognitions in piping and valve tags.
+    Fixes common engineering OCR character misrecognitions in piping, equipment, and valve tags.
     """
     if not text:
         return ""
@@ -64,10 +64,29 @@ def rectify_ocr_typos(text: str) -> str:
     cleaned = re.sub(r'\bl/2"', '1/2"', cleaned)
     cleaned = re.sub(r'\b3I4"', '3/4"', cleaned)
     cleaned = re.sub(r'\bI"', '1"', cleaned)
-    # Fix stray tick stroke before single-digit pipe sizes (e.g. 74" -> 4", 73" -> 3")
+    # Fix stray tick stroke before single-digit pipe sizes (e.g. 74" -> 4", 73" -> 3", 72" -> 2", 7"- -> 1"-)
     cleaned = re.sub(r'\b7([23468]")', r'\1', cleaned)
+    cleaned = re.sub(r'\b7"-(?=[A-Z])', '1"-', cleaned)
+    # Clean leading tilde/quote/apostrophe on pipe sizes: ~4"- -> 4"-, "8"- -> 8"-
+    cleaned = re.sub(r'^[~`\'\"]+(\d+(?:[/\.]\d+)?["\'])', r'\1', cleaned)
     # Insert missing hyphen between pipe size and letter code (e.g. 4"TA-4424 -> 4"-TA-4424)
     cleaned = re.sub(r'(\d+(?:[/\.]\d+)?(?:["\']|mm|DN))([A-Z])', r'\1-\2', cleaned)
+
+    # Normalize spaces/dots in line tags into hyphens: e.g. 4" TA 4424 -> 4"-TA-4424, 8" PV 26 9035 -> 8"-PV-26-9035
+    cleaned = re.sub(
+        r'(\d+(?:[/\.]\d+)?(?:["\']|mm|DN))\s*[-–\s\.]\s*([A-Z]{2,4})\s*[-–\s\.]\s*(\d{3,5})',
+        r'\1-\2-\3',
+        cleaned, flags=re.IGNORECASE
+    )
+
+    # Convert dropped inch marks on known standard pipe sizes (e.g. 4-TA-4424 -> 4"-TA-4424)
+    valid_pipe_sizes = {'1/2', '3/4', '1', '2', '3', '4', '6', '8', '10', '12', '14', '16', '18', '20', '24'}
+    m = re.match(r'^(\d{1,2})\s*[-–]\s*([A-Z]{2,4})\s*[-–]\s*(\d{3,5})(?:[-–](.+))?$', cleaned, re.IGNORECASE)
+    if m and m.group(1) in valid_pipe_sizes:
+        size, svc, seq = m.group(1), m.group(2).upper(), m.group(3)
+        rest = f"-{m.group(4)}" if m.group(4) else ""
+        if svc not in _KNOWN_VALVE_PREFIXES:
+            cleaned = f'{size}"-{svc}-{seq}{rest}'
 
     # 3. Fix en-dashes / em-dashes / long underscores to standard hyphen
     cleaned = re.sub(r'[–—_]+', '-', cleaned)
@@ -291,5 +310,96 @@ def stitch_fragmented_tags(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # Otherwise keep original item
         stitched_items.append(item_i)
 
+    # ── 3. Multi-line Bubble & Symbol Stacking (Circles, Squares, Circle-in-Square DCS) ──
+    # Combines vertically stacked text {text_above}-{middle_text}-{text_below} inside figures
+    stitched_items = stitch_symbol_bubbles(stitched_items)
+
     logger.debug(f"tag_stitcher: Processed {n} OCR items -> {len(stitched_items)} stitched items.")
     return stitched_items
+
+
+def stitch_symbol_bubbles(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Stitches multi-line text vertically stacked inside equipment and instrument symbols
+    (circles, squares, and circle-in-a-square DCS / PLC combo symbols).
+    Captures text above, middle, and below, joining them with hyphens:
+      {text_above}-{middle_text}-{text_below}
+    to form complete, uniquely identified equipment and instrument tags.
+    """
+    if not items:
+        return []
+
+    # Sort items primarily by X, then Y
+    sorted_items = sorted(items, key=lambda it: (round(float(it.get('center_x', 0)), 2), float(it.get('center_y', 0))))
+    n = len(sorted_items)
+    used = set()
+    assembled = []
+
+    for i in range(n):
+        if i in used:
+            continue
+        it1 = sorted_items[i]
+        t1 = str(it1.get('text', '')).strip()
+        cx1 = float(it1.get('center_x', 0))
+        cy1 = float(it1.get('center_y', 0))
+
+        # Skip long notes / descriptions
+        if len(t1) > 16 or any(w in t1.upper() for w in ['NOTE', 'PLEASE', 'TOLERANCE', 'DRAWING', 'VALVES', 'CLOSED VESSEL', 'TEMPERATURE', 'ALL FIXTURES']):
+            continue
+
+        # Look for tokens vertically stacked with i (same X column within 0.015, Y gap within 0.038)
+        group = [i]
+        curr_y = cy1
+        for j in range(n):
+            if j == i or j in used or j in group:
+                continue
+            it2 = sorted_items[j]
+            t2 = str(it2.get('text', '')).strip()
+            if len(t2) > 16 or any(w in t2.upper() for w in ['NOTE', 'PLEASE', 'TOLERANCE', 'DRAWING']):
+                continue
+            cx2 = float(it2.get('center_x', 0))
+            cy2 = float(it2.get('center_y', 0))
+            
+            # Check if j is directly below curr_y within vertical bubble/symbol boundary
+            if abs(cx1 - cx2) <= 0.015 and 0.003 <= (cy2 - curr_y) <= 0.038:
+                group.append(j)
+                curr_y = cy2
+
+        if len(group) >= 2:
+            # Sort group vertically from top to bottom
+            group.sort(key=lambda idx: float(sorted_items[idx].get('center_y', 0)))
+            tokens = [str(sorted_items[idx].get('text', '')).strip() for idx in group]
+            
+            # Clean tokens: remove leading/trailing noise, quotes, tildes, hyphens
+            clean_tokens = []
+            for tok in tokens:
+                c = re.sub(r'^[~`\'\"#@*_\-\s]+|[~`\'\"#@*_\-\s]+$', '', tok).strip()
+                if c:
+                    clean_tokens.append(c)
+
+            if len(clean_tokens) >= 2:
+                for idx in group:
+                    used.add(idx)
+
+                # Assemble with hyphens: {top}-{middle}-{bottom}
+                composite_tag = "-".join(clean_tokens)
+                
+                min_cx = min(float(sorted_items[idx].get('center_x', 0)) for idx in group)
+                max_cx = max(float(sorted_items[idx].get('center_x', 0)) for idx in group)
+                min_cy = min(float(sorted_items[idx].get('center_y', 0)) for idx in group)
+                max_cy = max(float(sorted_items[idx].get('center_y', 0)) for idx in group)
+                avg_conf = sum(float(sorted_items[idx].get('confidence', 0.9)) for idx in group) / len(group)
+
+                new_item = {
+                    'text': composite_tag,
+                    'value': composite_tag,
+                    'tag': composite_tag,
+                    'confidence': round(avg_conf, 3),
+                    'center_x': round((min_cx + max_cx) / 2.0, 4),
+                    'center_y': round((min_cy + max_cy) / 2.0, 4),
+                    'bbox': [[min_cx, min_cy], [max_cx, min_cy], [max_cx, max_cy], [min_cx, max_cy]],
+                    'is_symbol_bubble': True
+                }
+                assembled.append(new_item)
+
+    return items + assembled

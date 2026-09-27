@@ -106,11 +106,13 @@ _EQUIP_PREFIX_ALLOWLIST = {
     'SK', 'PK', 'PKG', 'KZ', 'ME',
     # General mechanical
     'M', 'MA', 'MB', 'U', 'UA', 'W', 'WA',
+    # Expanded vendor, station, process package, and utility equipment
+    'OP', 'AB', 'CD', 'MN', 'WX', 'STA', 'SAMPLE', 'LEL', 'DDL', 'RRQ', 'IV', 'J',
 }
 
-# Generic 1-3 letter + 3-5 digit equipment — guarded with prefix allowlist (supports sub-equipment e.g. HA-911-C01)
+# Generic 1-6 letter + 2-6 digit equipment — guarded with prefix allowlist (supports multi-line stacked tags e.g. AB-44558-12, 4-STA-6)
 _GENERIC_EQUIP_PATTERN = re.compile(
-    r'\b([A-Z]{1,3}-\d{3,5}[A-Z]?(?:-[A-Z0-9]{1,4})?(?:/[A-Z])?)\b', re.IGNORECASE
+    r'\b([A-Z0-9]{1,6}-\d{2,6}[A-Z]?(?:-[A-Z0-9]{1,6})*(?:/[A-Z])?)\b', re.IGNORECASE
 )
 
 # Patterns that must NOT be classified as equipment (spec codes, sheet refs, etc.)
@@ -191,13 +193,13 @@ _VALVE_SEARCH = re.compile(
     re.IGNORECASE
 )
 
-# Line tags: 8"-PV-26-9035-FC11S-08, 12mm-PV-26-9116-FD70X-00, 3"-VA-26-9121-AC21-00, 4"-TA-4424, PV-26-9035-FC11S-08
+# Line tags: 8"-PV-26-9035-FC11S-08, 12mm-PV-26-9116-FD70X-00, 3"-VA-26-9121-AC21-00, 4"-TA-4424, 4" TA 4424
 _LINE_SEARCH = re.compile(
-    r'((?:\d+(?:[/\.]\d+)?(?:["\']|mm|DN)\s*[-–]?\s*)[A-Z]{1,4}\s*[-–]\s*(?:\d{2,4}\s*[-–]\s*)?\d{3,5}'
-    r'(?:\s*[-–]\s*[A-Z0-9]{2,8}(?:\s*[-–]\s*[A-Z0-9]{1,8})?)?'
+    r'((?:\d+(?:[/\.]\d+)?(?:["\']|mm|DN)\s*[-–\s\.]?\s*)[A-Z]{1,4}\s*[-–\s\.]\s*(?:\d{2,4}\s*[-–\s\.]\s*)?\d{3,5}'
+    r'(?:\s*[-–\s\.]\s*[A-Z0-9]{2,8}(?:\s*[-–\s\.]\s*[A-Z0-9]{1,8})?)?'
     r'|'
-    r'[A-Z]{1,4}\s*[-–]\s*(?:\d{2,4}\s*[-–]\s*)?\d{3,5}'
-    r'\s*[-–]\s*[A-Z0-9]{2,8}(?:\s*[-–]\s*[A-Z0-9]{1,8})?)',
+    r'[A-Z]{1,4}\s*[-–\s\.]\s*(?:\d{2,4}\s*[-–\s\.]\s*)?\d{3,5}'
+    r'\s*[-–\s\.]\s*[A-Z0-9]{2,8}(?:\s*[-–\s\.]\s*[A-Z0-9]{1,8})?)',
     re.IGNORECASE
 )
 
@@ -594,6 +596,10 @@ def classify_paddle_results(
             raw_tag_clean = _NOTE_REF_STRIP_RE.sub('', raw_tag).strip().rstrip('-')
             tag = re.sub(r'\s+', '', raw_tag_clean).upper()
             if not tag or len(tag) < 4:
+                continue
+
+            # Guard against filenames, document markers, and watermarks being treated as lines
+            if re.search(r'(?:SAMPLE|DWG|DRAWING|DOC|REF|SHEET|PAGE|JPG|PNG|PDF)', tag, re.IGNORECASE):
                 continue
 
             # Guard against equipment tags without size prefix (e.g. HA-911-C01, 26-KA-901-M01, 26-ST-9002)
