@@ -35,9 +35,14 @@ _CORE_LINE_TAG_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Valve prefix fragments (e.g., HV, XV, 26-GB, 26CB)
+# Valve prefix fragments (e.g., HV, XV, 26-GB, 26CB, EF, QR, GH, KL, ST, CS)
+_KNOWN_VALVE_PREFIXES = {
+    'HV', 'XV', 'CV', 'PCV', 'FCV', 'TCV', 'LCV', 'MOV', 'SDV', 'BDV', 'FV', 'UV', 'TV',
+    'LV', 'AV', 'ZV', 'RV', 'SV', 'DV', 'WV', 'MV', 'BV', 'NV', 'GV', 'BFV', 'PLV',
+    'QR', 'GH', 'KL', 'EF', 'ST', 'CS'
+}
 _VALVE_PREFIX_PATTERN = re.compile(
-    r'^(?:\d{2}-?)?(?:HV|XV|CV|PCV|FCV|TCV|LCV|MOV|SDV|BDV|GB|CB|BV|NV|GV|BFV|PLV|V)[-–]?$',
+    r'^(?:\d{2}-?)?(?:HV|XV|CV|PCV|FCV|TCV|LCV|MOV|SDV|BDV|GB|CB|BV|NV|GV|BFV|PLV|QR|GH|KL|EF|ST|CS|V)[-–]?$',
     re.IGNORECASE
 )
 
@@ -59,6 +64,10 @@ def rectify_ocr_typos(text: str) -> str:
     cleaned = re.sub(r'\bl/2"', '1/2"', cleaned)
     cleaned = re.sub(r'\b3I4"', '3/4"', cleaned)
     cleaned = re.sub(r'\bI"', '1"', cleaned)
+    # Fix stray tick stroke before single-digit pipe sizes (e.g. 74" -> 4", 73" -> 3")
+    cleaned = re.sub(r'\b7([23468]")', r'\1', cleaned)
+    # Insert missing hyphen between pipe size and letter code (e.g. 4"TA-4424 -> 4"-TA-4424)
+    cleaned = re.sub(r'(\d+(?:[/\.]\d+)?(?:["\']|mm|DN))([A-Z])', r'\1-\2', cleaned)
 
     # 3. Fix en-dashes / em-dashes / long underscores to standard hyphen
     cleaned = re.sub(r'[–—_]+', '-', cleaned)
@@ -186,19 +195,24 @@ def stitch_fragmented_tags(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if _PIPE_SIZE_PATTERN.match(text_i):
             # Look for adjacent core line tag to the right or below
             matched_j = None
-            best_dist = 999.0
+            best_dist = 0.09  # Strictly adjacent tokens only (not distant drawing elements)
 
             for j in range(n):
                 if i == j or j in merged_indices:
                     continue
                 item_j = processed_items[j]
                 text_j = item_j.get("text", "").strip()
+                # Exclude valve tags from being falsely stitched as line cores
+                code_m = re.match(r'^([A-Z]{2,4})[-–]', text_j, re.IGNORECASE)
+                if code_m and code_m.group(1).upper() in _KNOWN_VALVE_PREFIXES:
+                    continue
+
                 cx_j, cy_j, w_j, h_j, xmin_j, xmax_j = _get_item_box(item_j)
 
                 # Same horizontal line (cy close) and j is to the right of i
-                is_horiz = abs(cy_i - cy_j) < max(0.025, h_i * 1.2) and (0 <= (cx_j - cx_i) < 0.25)
+                is_horiz = abs(cy_i - cy_j) < max(0.025, h_i * 1.2) and (0 <= (cx_j - cx_i) < 0.08)
                 # Or same vertical column (cx close) and j is below i
-                is_vert = abs(cx_i - cx_j) < max(0.025, w_i * 1.2) and (0 <= (cy_j - cy_i) < 0.20)
+                is_vert = abs(cx_i - cx_j) < max(0.025, w_i * 1.2) and (0 <= (cy_j - cy_i) < 0.08)
 
                 if (is_horiz or is_vert) and _CORE_LINE_TAG_PATTERN.search(text_j):
                     dist = math.hypot(cx_j - cx_i, cy_j - cy_i)
@@ -226,8 +240,13 @@ def stitch_fragmented_tags(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         continue
                     item_k = processed_items[k]
                     text_k = item_k.get("text", "").strip()
+                    # Do not stitch valve tags as trailing specs
+                    code_k = re.match(r'^([A-Z]{2,4})[-–]', text_k, re.IGNORECASE)
+                    if code_k and code_k.group(1).upper() in _KNOWN_VALVE_PREFIXES:
+                        continue
+
                     cx_k, cy_k, _, _, _, _ = _get_item_box(item_k)
-                    if abs(cy_m - cy_k) < 0.025 and (0 <= (cx_k - cx_m) < 0.20) and _SPEC_OR_INSULATION_PATTERN.match(text_k):
+                    if abs(cy_m - cy_k) < 0.025 and (0 <= (cx_k - cx_m) < 0.08) and _SPEC_OR_INSULATION_PATTERN.match(text_k):
                         combined_tag = f"{combined_tag}-{text_k}".replace('--', '-')
                         merged_item["text"] = combined_tag
                         merged_item["value"] = combined_tag

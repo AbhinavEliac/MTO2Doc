@@ -151,8 +151,14 @@ def _get_easyocr():
 
 def _run_easyocr(image_path: str, img_w: int, img_h: int) -> List[Dict[str, Any]]:
     """
-    Run EasyOCR on loaded image with dual-angle perception (0° horizontal + 90° vertical)
-    to ensure full capture of vertical piping lines and valve tags.
+    Run EasyOCR on loaded image with 4-direction cardinal perception:
+      - 0°:   Standard horizontal text (left-to-right)
+      - 90°:  Vertical text CW (top-to-bottom lines & valves)
+      - 180°: Inverted horizontal text (bottom-mounted tags & reverse lines)
+      - 270°: Vertical text CCW (bottom-to-top lines & margins)
+
+    Captures smallest fine text (min_size=3, text_threshold=0.30, low_text=0.20),
+    inverts rotated coordinates back to original image space, and deduplicates spatially.
     """
     reader = _get_easyocr()
     import cv2
@@ -162,84 +168,120 @@ def _run_easyocr(image_path: str, img_w: int, img_h: int) -> List[Dict[str, Any]
 
     H, W = img_cv.shape[:2]
 
-    # Pass 1: Horizontal text (0°)
-    raw_h = reader.readtext(img_cv, detail=1, paragraph=False,
-                            min_size=5, text_threshold=0.4, low_text=0.25,
-                            decoder='greedy', workers=0)
-    items = []
-    seen_texts = set()
+    # Cardinal orientation matrices
+    rotations = {
+        0: img_cv,
+        90: cv2.rotate(img_cv, cv2.ROTATE_90_CLOCKWISE),
+        180: cv2.rotate(img_cv, cv2.ROTATE_180),
+        270: cv2.rotate(img_cv, cv2.ROTATE_90_COUNTERCLOCKWISE),
+    }
 
-    for res in raw_h:
-        if len(res) == 3:
-            bbox, text, conf = res
-        elif len(res) == 2:
-            bbox, text = res
-            conf = 0.90
-        else:
-            continue
+    all_raw_items = []
 
-        clean_text = text.strip()
-        if not clean_text or float(conf) < 0.15:
-            continue
-        xs = [pt[0] for pt in bbox]
-        ys = [pt[1] for pt in bbox]
-        center_x = round((sum(xs) / len(xs)) / max(W, 1), 4)
-        center_y = round((sum(ys) / len(ys)) / max(H, 1), 4)
-        items.append({
-            "text": clean_text,
-            "confidence": round(float(conf), 3),
-            "bbox": bbox,
-            "center_x": center_x,
-            "center_y": center_y,
-        })
-        seen_texts.add(clean_text)
+    for angle, rot_img in rotations.items():
+        try:
+            # High-sensitivity OCR parameters to catch fine, small, and faint text
+            raw = reader.readtext(
+                rot_img,
+                detail=1,
+                paragraph=False,
+                min_size=3,
+                text_threshold=0.30,
+                low_text=0.20,
+                link_threshold=0.30,
+                canvas_size=2560,
+                decoder='greedy',
+                workers=0
+            )
 
-    # Pass 2: Vertical text (90° clockwise rotation)
-    try:
-        img_cw = cv2.rotate(img_cv, cv2.ROTATE_90_CLOCKWISE)
-        raw_cw = reader.readtext(img_cw, detail=1, paragraph=False,
-                                 min_size=5, text_threshold=0.4, low_text=0.25,
-                                 decoder='greedy', workers=0)
-        for res in raw_cw:
-            if len(res) == 3:
-                bbox_rot, text, conf = res
-            elif len(res) == 2:
-                bbox_rot, text = res
-                conf = 0.90
-            else:
-                continue
+            for res in raw:
+                if len(res) == 3:
+                    bbox_rot, text, conf = res
+                elif len(res) == 2:
+                    bbox_rot, text = res
+                    conf = 0.90
+                else:
+                    continue
 
-            clean_text = text.strip()
-            if not clean_text or float(conf) < 0.20:
-                continue
-            # Map coordinates from 90° CW rotated space back to original image space
-            # Rotated (xr, yr) -> Original (yr, H - 1 - xr)
-            orig_bbox = [[float(pt[1]), float(H - 1 - pt[0])] for pt in bbox_rot]
-            xs = [pt[0] for pt in orig_bbox]
-            ys = [pt[1] for pt in orig_bbox]
-            center_x = round((sum(xs) / len(xs)) / max(W, 1), 4)
-            center_y = round((sum(ys) / len(ys)) / max(H, 1), 4)
+                clean_text = text.strip()
+                if not clean_text or float(conf) < 0.15:
+                    continue
 
-            # Avoid exact duplicate text at the same spatial coordinates
-            is_dup = False
-            if clean_text in seen_texts:
-                for existing in items:
-                    if existing["text"] == clean_text and abs(existing["center_x"] - center_x) < 0.03 and abs(existing["center_y"] - center_y) < 0.03:
-                        is_dup = True
-                        break
-            if not is_dup:
-                items.append({
+                # Filter single-character noise on rotated passes unless numeric or valid single-letter tag
+                if angle != 0 and len(clean_text) < 2 and not clean_text.isdigit() and clean_text.upper() not in {'V', 'P', 'E', 'T', 'F', 'L'}:
+                    continue
+
+                # Invert rotated coordinates back into original image coordinate space
+                if angle == 0:
+                    orig_bbox = [[float(pt[0]), float(pt[1])] for pt in bbox_rot]
+                elif angle == 90:
+                    # 90° CW: (xr, yr) -> (yr, H - 1 - xr)
+                    orig_bbox = [[float(pt[1]), float(H - 1 - pt[0])] for pt in bbox_rot]
+                elif angle == 180:
+                    # 180°: (xr, yr) -> (W - 1 - xr, H - 1 - yr)
+                    orig_bbox = [[float(W - 1 - pt[0]), float(H - 1 - pt[1])] for pt in bbox_rot]
+                elif angle == 270:
+                    # 270° CCW: (xr, yr) -> (W - 1 - yr, xr)
+                    orig_bbox = [[float(W - 1 - pt[1]), float(pt[0])] for pt in bbox_rot]
+
+                xs = [pt[0] for pt in orig_bbox]
+                ys = [pt[1] for pt in orig_bbox]
+                center_x = round((sum(xs) / len(xs)) / max(W, 1), 4)
+                center_y = round((sum(ys) / len(ys)) / max(H, 1), 4)
+
+                all_raw_items.append({
                     "text": clean_text,
                     "confidence": round(float(conf), 3),
                     "bbox": orig_bbox,
                     "center_x": center_x,
                     "center_y": center_y,
+                    "angle": angle,
                 })
-                seen_texts.add(clean_text)
-    except Exception as rot_err:
-        logger.warning(f"Vertical OCR pass warning: {rot_err}")
+        except Exception as scan_err:
+            logger.warning(f"EasyOCR angle {angle}° scan warning: {scan_err}")
 
-    return items
+    # ── Spatial Deduplication & Merging Across Angles ──────────────────────────
+    # If two detections are at virtually the same spot (dx < 0.02, dy < 0.02):
+    # - If text matches (or case-insensitive equal), keep highest confidence.
+    # - If one contains an engineering tag format, prefer the tag.
+    merged_items: List[Dict[str, Any]] = []
+
+    for item in all_raw_items:
+        t = item["text"]
+        cx = item["center_x"]
+        cy = item["center_y"]
+        conf = item["confidence"]
+
+        matched_idx = None
+        for idx, existing in enumerate(merged_items):
+            ecx = existing["center_x"]
+            ecy = existing["center_y"]
+            if abs(cx - ecx) < 0.020 and abs(cy - ecy) < 0.020:
+                et = existing["text"]
+                # Exact or case-insensitive match
+                if t.upper() == et.upper():
+                    matched_idx = idx
+                    break
+                # Substring match (e.g. '4"-TA-4424' vs 'TA-4424')
+                if t.upper() in et.upper() or et.upper() in t.upper():
+                    matched_idx = idx
+                    break
+
+        if matched_idx is not None:
+            existing = merged_items[matched_idx]
+            et = existing["text"]
+            econf = existing["confidence"]
+            # Prefer longer tag or higher confidence if same length
+            if len(t) > len(et) or (len(t) == len(et) and conf > econf):
+                merged_items[matched_idx] = item
+        else:
+            merged_items.append(item)
+
+    logger.info(
+        f"EasyOCR 4-way perception: {len(all_raw_items)} raw items across 4 angles "
+        f"-> {len(merged_items)} deduplicated text items."
+    )
+    return merged_items
 
 
 # ──────────────────────────────────────────────────────────────────────────────

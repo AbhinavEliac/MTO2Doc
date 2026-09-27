@@ -152,7 +152,7 @@ _ISA_SAFE_CODES = [
 ]
 _ISA_SAFE_CODES_JOINED = '|'.join(_ISA_SAFE_CODES)
 _BARE_INSTRUMENT_SEARCH = re.compile(
-    rf'\b((?:{_ISA_SAFE_CODES_JOINED})-\d{{3,5}}[A-Z]?)\b',  # hyphen required, 3+ digits
+    rf'\b((?:{_ISA_SAFE_CODES_JOINED})[-–]\d{{1,5}}(?:[/-][\dA-Z]{{1,5}})?[A-Z]?)\b',
     re.IGNORECASE
 )
 
@@ -173,14 +173,19 @@ _SERVICE_CODE_PATTERN = re.compile(
 #   Separated:       26-CB-9131A, 26-GB-9178
 #   Named control valves: HV-101, XV-201, FV-9076, PCV-9044, SDV-201
 #   Block valves: BV-101, NV-201, GV-101, BFV-201
-#   Synthetic / Vendor prefixes: QR-70427, GH-83714, KL-21519, EF-96470, ST-93705, CS-97
+#   Synthetic / Vendor prefixes: QR-70427, GH-83714, KL-21519, EF-96470, ST-93705, CS-97, WV-70609, DV-07707
+_KNOWN_VALVE_PREFIXES = {
+    'HV', 'XV', 'CV', 'PCV', 'FCV', 'TCV', 'LCV', 'MOV', 'SDV', 'BDV', 'FV', 'UV', 'TV',
+    'LV', 'AV', 'ZV', 'RV', 'SV', 'DV', 'WV', 'MV', 'BV', 'NV', 'GV', 'BFV', 'PLV',
+    'QR', 'GH', 'KL', 'EF', 'ST', 'CS'
+}
 _VALVE_SEARCH = re.compile(
     r'\b('
     r'\d{2}-?[A-Z]{2}-?\d{4,6}[A-Z]?'                           # 26CB9131, 26-CB-9131A
-    r'|(?:HV|XV|CV|PCV|FCV|TCV|LCV|EV|MOV|SDV|BDV|FV|UV|TV|LV|AV|ZV|RV|SV)[-–]\d{2,6}[A-Z]?'  # HV-101, SDV-201
+    r'|(?:HV|XV|CV|PCV|FCV|TCV|LCV|EV|MOV|SDV|BDV|FV|UV|TV|LV|AV|ZV|RV|SV|DV|WV|MV)[-–]\d{2,6}[A-Z]?'  # HV-101, SDV-201
     r'|(?:BV|NV|GV|BFV|SBV|NGV|PLV|PRV)[-–]\d{2,6}[A-Z]?'      # BV-101, NV-201
-    r'|(?:QR|GH|KL|EF|ST|CS)[-–]\d{2,6}[A-Z]?'                  # Synthetic P&ID valve tags
-    r'|\bV-\d{3,5}[A-Z]?'                                         # V-101
+    r'|(?:QR|GH|KL|EF|ST|CS|WV|DV|RV|AV|CV|UV)[-–]\d{2,6}[A-Z]?'  # Synthetic P&ID valve tags
+    r'|\bV-\d{2,5}[A-Z]?'                                         # V-101, V-700
     r'|(?:(?:LOADING|SUCTION|PURGE|VENT|DISCHARGE|RECYCLE|BYPASS|RELIEF|BLOWDOWN|CHECK|MAINLINE(?:\s+BLOCK)?)\s+VALVE)'  # Schematic valve callouts
     r')\b',
     re.IGNORECASE
@@ -602,6 +607,10 @@ def classify_paddle_results(
                 if len(parts) >= 3 and parts[0].isdigit() and len(parts[0]) == 2 and not has_explicit_size:
                     if parts[1] in (_EQUIP_PREFIX_ALLOWLIST | _EQUIPMENT_CODES):
                         continue
+                # Guard against valve tags being misclassified as lines (e.g. 29"-EF-96470, EF-96470)
+                svc_code = parts[1] if has_explicit_size and len(parts) >= 2 else parts[0]
+                if svc_code in _KNOWN_VALVE_PREFIXES:
+                    continue
 
             flag_reason = None
             tag_conf = conf
