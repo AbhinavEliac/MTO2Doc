@@ -150,18 +150,26 @@ def _get_easyocr():
 
 
 def _run_easyocr(image_path: str, img_w: int, img_h: int) -> List[Dict[str, Any]]:
-    """Run EasyOCR on loaded image numpy array and normalize output."""
+    """
+    Run EasyOCR on loaded image with dual-angle perception (0° horizontal + 90° vertical)
+    to ensure full capture of vertical piping lines and valve tags.
+    """
     reader = _get_easyocr()
     import cv2
     img_cv = cv2.imread(image_path)
     if img_cv is None:
         return []
 
-    raw = reader.readtext(img_cv, detail=1, paragraph=False,
-                          min_size=5, text_threshold=0.4, low_text=0.25,
-                          decoder='greedy', workers=0)
+    H, W = img_cv.shape[:2]
+
+    # Pass 1: Horizontal text (0°)
+    raw_h = reader.readtext(img_cv, detail=1, paragraph=False,
+                            min_size=5, text_threshold=0.4, low_text=0.25,
+                            decoder='greedy', workers=0)
     items = []
-    for res in raw:
+    seen_texts = set()
+
+    for res in raw_h:
         if len(res) == 3:
             bbox, text, conf = res
         elif len(res) == 2:
@@ -170,19 +178,67 @@ def _run_easyocr(image_path: str, img_w: int, img_h: int) -> List[Dict[str, Any]
         else:
             continue
 
-        if not text.strip() or float(conf) < 0.15:
+        clean_text = text.strip()
+        if not clean_text or float(conf) < 0.15:
             continue
         xs = [pt[0] for pt in bbox]
         ys = [pt[1] for pt in bbox]
-        center_x = round((sum(xs) / len(xs)) / max(img_w, 1), 4)
-        center_y = round((sum(ys) / len(ys)) / max(img_h, 1), 4)
+        center_x = round((sum(xs) / len(xs)) / max(W, 1), 4)
+        center_y = round((sum(ys) / len(ys)) / max(H, 1), 4)
         items.append({
-            "text": text.strip(),
+            "text": clean_text,
             "confidence": round(float(conf), 3),
             "bbox": bbox,
             "center_x": center_x,
             "center_y": center_y,
         })
+        seen_texts.add(clean_text)
+
+    # Pass 2: Vertical text (90° clockwise rotation)
+    try:
+        img_cw = cv2.rotate(img_cv, cv2.ROTATE_90_CLOCKWISE)
+        raw_cw = reader.readtext(img_cw, detail=1, paragraph=False,
+                                 min_size=5, text_threshold=0.4, low_text=0.25,
+                                 decoder='greedy', workers=0)
+        for res in raw_cw:
+            if len(res) == 3:
+                bbox_rot, text, conf = res
+            elif len(res) == 2:
+                bbox_rot, text = res
+                conf = 0.90
+            else:
+                continue
+
+            clean_text = text.strip()
+            if not clean_text or float(conf) < 0.20:
+                continue
+            # Map coordinates from 90° CW rotated space back to original image space
+            # Rotated (xr, yr) -> Original (yr, H - 1 - xr)
+            orig_bbox = [[float(pt[1]), float(H - 1 - pt[0])] for pt in bbox_rot]
+            xs = [pt[0] for pt in orig_bbox]
+            ys = [pt[1] for pt in orig_bbox]
+            center_x = round((sum(xs) / len(xs)) / max(W, 1), 4)
+            center_y = round((sum(ys) / len(ys)) / max(H, 1), 4)
+
+            # Avoid exact duplicate text at the same spatial coordinates
+            is_dup = False
+            if clean_text in seen_texts:
+                for existing in items:
+                    if existing["text"] == clean_text and abs(existing["center_x"] - center_x) < 0.03 and abs(existing["center_y"] - center_y) < 0.03:
+                        is_dup = True
+                        break
+            if not is_dup:
+                items.append({
+                    "text": clean_text,
+                    "confidence": round(float(conf), 3),
+                    "bbox": orig_bbox,
+                    "center_x": center_x,
+                    "center_y": center_y,
+                })
+                seen_texts.add(clean_text)
+    except Exception as rot_err:
+        logger.warning(f"Vertical OCR pass warning: {rot_err}")
+
     return items
 
 
