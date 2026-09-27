@@ -148,9 +148,9 @@ _SET_PRESSURE_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Flange ratings near PSV (e.g. 3"x4" 300# 150#)
+# Flange ratings near PSV (e.g. 4"x1.5" or 3"x4" 300# 150#)
 _FLANGE_SPEC_RE = re.compile(
-    r'\b(\d+(?:/\d+)?["\']?)\s*[xX]\s*(\d+(?:/\d+)?["\']?)\s*(?:(\d{3,4}#)\s*(\d{3,4}#)?)?',
+    r'\b(\d+(?:\.\d+|/\d+)?["\']?)\s*[xX]\s*(\d+(?:\.\d+|/\d+)?["\']?)\s*(?:(\d{3,4}#)\s*(\d{3,4}#)?)?',
     re.IGNORECASE
 )
 

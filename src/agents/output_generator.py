@@ -222,6 +222,20 @@ class OutputGeneratorAgent(BaseAgent):
                 } for i, e in enumerate(graph.equipment)]
                 write_sheet("Equipment List", f"EQUIPMENT LIST — {dt_label}", f"Extracted by SID-AI | {len(rows)} equipment items detected", headers, rows)
 
+            # Relationships List
+            if graph.relationships:
+                headers = ["#", "Source Tag", "Relationship Type", "Target Tag", "Confidence", "Evidence", "Flag Reason"]
+                rows = [{
+                    "#": i + 1,
+                    "Source Tag": getattr(r, 'source_tag', getattr(r, 'source', '')),
+                    "Relationship Type": str(getattr(r, 'rel_type', getattr(r, 'type', ''))).upper(),
+                    "Target Tag": getattr(r, 'target_tag', getattr(r, 'target', '')),
+                    "Confidence": f"{int(getattr(r, 'confidence', 0.85) * 100)}%",
+                    "Evidence": str((getattr(r, 'attributes', {}) or {}).get('evidence', '-')),
+                    "Flag Reason": getattr(r, 'flag_reason', '-') or "-",
+                } for i, r in enumerate(graph.relationships)]
+                write_sheet("Relationships", f"TOPOLOGICAL RELATIONSHIPS — {dt_label}", f"Extracted by SID-AI | {len(rows)} connections", headers, rows)
+
         elif drawing_type == 'ELECTRICAL_LAYOUT':
             if graph.luminaires:
                 headers = ["#", "Luminaire Tag", "Fitting Type", "Wattage", "Circuit", "Panel", "Elevation", "Location"]

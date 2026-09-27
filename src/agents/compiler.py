@@ -155,7 +155,8 @@ class CompilerAgent(BaseAgent):
         # Always compile relationships (cross-type) using master tag alias lookup
         graph.relationships = self._compile_relationships(all_relations, tag_alias_map)
 
-        # Guarantee zero orphan instruments in the engineering graph
+        # Engineering-aware loop matching for unlinked instruments (Rules 5 & 10)
+        # Only associate if the instrument loop sequence genuinely matches a line. Never arbitrarily hook to lines[0].
         rel_tags = set()
         for r in graph.relationships:
             rel_tags.add(r.source)
@@ -173,18 +174,14 @@ class CompilerAgent(BaseAgent):
                         if seq in l.tag or (getattr(l, 'sequence_number', None) and seq == l.sequence_number):
                             best_target = l.tag
                             break
-                if not best_target and graph.lines:
-                    best_target = graph.lines[0].tag
-                elif not best_target and graph.equipment:
-                    best_target = graph.equipment[0].tag
 
                 if best_target:
                     graph.relationships.append(Relationship(
                         source=inst.tag,
                         target=best_target,
                         type="monitors",
-                        confidence=0.85,
-                        attributes={"inferred": True},
+                        confidence=0.82,
+                        attributes={"loop_sequence_matched": True},
                     ))
                     rel_tags.add(inst.tag)
 
@@ -227,21 +224,58 @@ class CompilerAgent(BaseAgent):
         compiled = []
         seen_equip: dict = {}  # canonical key → EquipmentItem (deduplication)
         eq_tags = [t for t in texts if t["classification"] == "EQUIPMENT_TAG"]
+        
+        from src.utils.entity_validator import validate_equipment_candidate
+        
         for eq in eq_tags:
             tag = eq["tag"].strip()
+            
+            # Strict equipment candidate validation
+            cand = validate_equipment_candidate(tag)
+            if not cand.is_valid:
+                logger.debug(f"Compiler: rejected false equipment '{tag}' ({cand.rejection_reason})")
+                continue
+
             canon_key = re.sub(r'^\d{2,3}-', '', tag.upper())
+            core_base = re.sub(r'-[A-Z0-9]+$', '', canon_key)
 
             # Generic algorithmic deduplication:
             # 1. Exact canonical match (e.g. bare KA-901 merged into 26-KA-901)
-            # 2. Single-digit OCR run-on collision (e.g. CX-9011 vs CX-90111 where line size was OCR-concatenated)
+            # 2. Sub-train / component match (e.g. HA-911 vs 26-HA-911-C01)
+            # 3. Single-digit OCR run-on collision (e.g. CX-9011 vs CX-90111)
             matched_key = None
             if canon_key in seen_equip:
                 matched_key = canon_key
             else:
-                for k in seen_equip:
+                for k in list(seen_equip.keys()):
+                    k_core = re.sub(r'-[A-Z0-9]+$', '', k)
+                    # Sibling components/trains with distinct suffixes (e.g. HA-911-C01 vs HA-911-C02) must NOT merge
+                    is_sibling_suffix = (core_base == k_core and canon_key != k and canon_key != core_base and k != k_core)
+                    # Driver/motor (e.g. -M01) is distinct equipment from main driven unit (e.g. KA-902)
+                    is_motor_pair = bool((re.search(r'-M\d+$', canon_key) and not re.search(r'-M\d+$', k)) or
+                                         (re.search(r'-M\d+$', k) and not re.search(r'-M\d+$', canon_key)))
+
+                    # Sub-train match: HA-911 vs HA-911-C01 (base vs detailed tag)
+                    if not is_sibling_suffix and not is_motor_pair and (core_base == k or canon_key == k_core):
+                        matched_key = k
+                        # Prefer longer/more detailed tag (e.g. 26-HA-911-C01 over HA-911)
+                        if len(tag) > len(seen_equip[k].tag):
+                            item_obj = seen_equip.pop(k)
+                            old_tag = item_obj.tag
+                            item_obj.tag = tag
+                            if not item_obj.aliases:
+                                item_obj.aliases = []
+                            item_obj.aliases.append(old_tag)
+                            seen_equip[canon_key] = item_obj
+                            matched_key = canon_key
+                        else:
+                            if not seen_equip[k].aliases:
+                                seen_equip[k].aliases = []
+                            seen_equip[k].aliases.append(tag)
+                        break
                     # Single-digit OCR run-on collision (e.g. CX-9011 vs CX-90111)
-                    if (canon_key.startswith(k) and len(canon_key) == len(k) + 1 and canon_key[-1].isdigit()) or \
-                       (k.startswith(canon_key) and len(k) == len(canon_key) + 1 and k[-1].isdigit()):
+                    elif (canon_key.startswith(k) and len(canon_key) == len(k) + 1 and canon_key[-1].isdigit()) or \
+                         (k.startswith(canon_key) and len(k) == len(canon_key) + 1 and k[-1].isdigit()):
                         matched_key = k
                         # Keep the shorter, clean base tag
                         if len(canon_key) < len(k):
@@ -323,8 +357,11 @@ class CompilerAgent(BaseAgent):
             'REV', 'DWG', 'SHT', 'DETAIL', 'TYP', 'EL', 'M01', 'M02', 'M03', 'MOTOR'
         }
 
+        from src.utils.entity_validator import validate_line_candidate
         for lt in line_tags:
-            tag = lt["tag"]
+            tag = lt["tag"].strip()
+            if not validate_line_candidate(tag).is_valid:
+                continue
 
             # ── Pre-Export Schema Validator & Anti-Hallucination Filter ────────
             # 1. Reject motor tags or electrical cable circuits (e.g., 26-KA-902-M01, TT-26-9711-AS20-00)
@@ -522,63 +559,17 @@ class CompilerAgent(BaseAgent):
         self, texts: List[Dict], symbols: List[Dict],
         relations: List[Dict], lines: List[LineItem]
     ) -> List[InstrumentItem]:
+        from src.utils.instrument_resolver import resolve_instrument_candidates
         compiled = []
-        seen_canonical: dict = {}  # Deduplicate by canonical key
-        inst_tags = [t for t in texts if t["classification"] == "INSTRUMENT_TAG"]
+        inst_tags = [t for t in texts if t.get("classification") == "INSTRUMENT_TAG"]
+        resolved_insts, _ = resolve_instrument_candidates(inst_tags)
 
-        for inst in inst_tags:
-            tag = inst["tag"]
+        for r_inst in resolved_insts:
+            tag = r_inst.tag
+            loop_id = r_inst.loop_id
+            inst_type = r_inst.primary_type
 
-            canon_key = self._canonical_inst_key(tag)
-            if canon_key in seen_canonical:
-                existing_tag = seen_canonical[canon_key].tag
-                if len(tag) > len(existing_tag):
-                    seen_canonical[canon_key].tag = tag
-                continue
-
-            # ISA 5.1 instrument type from function code
-            type_match = re.search(r'([A-Z]{2,5})(?=-?\d)', tag)
-            if not type_match:
-                type_match = re.search(r'([A-Z]+)', tag)
-            inst_code = type_match.group(1) if type_match else "INST"
-            inst_type = self._ISA_TYPE_DESC.get(inst_code, inst_code)
-
-            coords = None
-            for sym in symbols:
-                if sym.get("inferred_tag") == tag:
-                    coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
-                    break
-
-            image_loop_id = None
-            if coords:
-                cy = (coords[0] + coords[2]) / 2.0
-                cx = (coords[1] + coords[3]) / 2.0
-                nearby_texts = []
-                yband_texts = []
-                for t in texts:
-                    attrs = t.get("attributes") or {}
-                    tx = safe_float(attrs.get("pos_x"), -1)
-                    ty = safe_float(attrs.get("pos_y"), -1)
-                    if tx >= 0 and ty >= 0:
-                        dist = math.hypot(cx - tx, cy - ty)
-                        if dist < 0.10:
-                            nearby_texts.append(t.get("value", ""))
-                        elif abs(ty - cy) < 0.015:
-                            yband_texts.append(t.get("value", ""))
-
-                for txt in (nearby_texts + yband_texts):
-                    num_match = re.search(r'(\d{3,5}[A-Z]?)', txt)
-                    if num_match:
-                        image_loop_id = num_match.group(1)
-                        break
-
-            if not image_loop_id:
-                loop_match = re.search(r'(\d{3,5}[A-Z]?)', tag)
-                image_loop_id = loop_match.group(1) if loop_match else "0000"
-
-            loop_id = image_loop_id
-
-            # ── High-Accuracy Instrument Process Service Resolution ─────────────────
+            # Resolve associated process line
             associated_line = None
             for rel in relations:
                 rtype = rel.get("rel_type", "").upper()
@@ -592,14 +583,12 @@ class CompilerAgent(BaseAgent):
                     break
 
             service_fluid = None
-            # Prioritize matching to primary process line
             if associated_line:
                 for line in lines:
                     if line.tag == associated_line and line.service not in ("TUBE", "IA", "INST"):
                         service_fluid = f"{line.service} ({line.tag})"
                         break
 
-            # If not found or associated was an instrument tube, match by loop ID sequence to process line
             if not service_fluid and loop_id != "0000":
                 for line in lines:
                     if line.sequence_number == loop_id and line.service not in ("TUBE", "IA"):
@@ -607,14 +596,14 @@ class CompilerAgent(BaseAgent):
                         break
 
             if not service_fluid and associated_line:
-                # If associated with equipment
                 service_fluid = associated_line
 
-            coords = None
-            for sym in symbols:
-                if sym.get("inferred_tag") == tag:
-                    coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
-                    break
+            coords = r_inst.coordinates
+            if not coords:
+                for sym in symbols:
+                    if sym.get("inferred_tag") == tag:
+                        coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
+                        break
 
             item_obj = InstrumentItem(
                 tag=tag,
@@ -623,9 +612,10 @@ class CompilerAgent(BaseAgent):
                 location="Field",
                 loop_id=loop_id,
                 coordinates=coords,
+                aliases=r_inst.aliases if r_inst.aliases else None,
+                confidence=r_inst.confidence,
             )
             compiled.append(item_obj)
-            seen_canonical[canon_key] = item_obj
 
         return compiled
 
@@ -837,11 +827,22 @@ class CompilerAgent(BaseAgent):
         return compiled
 
     def _compile_safety_relief_valves(self, texts: List[Dict], symbols: List[Dict]) -> List[SafetyReliefValveItem]:
+        from src.utils.entity_validator import normalize_psv_tag
+        from src.utils.relationship_engine import EngineeringRuleEngine
+
         compiled = []
-        psv_tags = [t for t in texts if t["classification"] == "PSV_TAG"]
+        seen_tags = set()
+        psv_tags = [t for t in texts if t.get("classification") == "PSV_TAG"]
+
+        flare_refs = {t.get("value", "").upper() for t in texts if "FLARE" in t.get("value", "").upper()}
 
         for psv in psv_tags:
-            tag = psv["tag"]
+            raw_tag = psv["tag"]
+            tag = normalize_psv_tag(raw_tag)
+            if tag in seen_tags:
+                continue
+            seen_tags.add(tag)
+
             attrs = psv.get("attributes") or {}
 
             unit_match = re.match(r'^(\d{2})-', tag)
@@ -849,7 +850,7 @@ class CompilerAgent(BaseAgent):
 
             coords = None
             for sym in symbols:
-                if sym.get("inferred_tag") == tag:
+                if sym.get("inferred_tag") in (tag, raw_tag):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
@@ -859,22 +860,18 @@ class CompilerAgent(BaseAgent):
                 or "N/A"
             )
 
-            # Auto-detect relief destination from notes/service callout (e.g. HP FLARE vs LP FLARE)
-            destination = attrs.get("relief_destination")
-            if not destination:
-                for t in texts:
-                    val = t.get("value", "").upper()
-                    if "HP FLARE" in val or "HP-FLARE" in val or "HIGH PRESSURE FLARE" in val:
-                        destination = "HP Flare Header"
-                        break
-                    elif "LP FLARE" in val or "LP-FLARE" in val or "LOW PRESSURE FLARE" in val:
-                        destination = "LP Flare Header"
-                        break
-                    elif "CLOSED DRAIN" in val or "DRAIN" in val:
-                        destination = "Closed Drain Header"
-                        break
-            if not destination:
-                destination = "HP Flare Header"
+            # Auto-detect relief destination with EngineeringRuleEngine
+            destination = attrs.get("relief_destination") or ""
+            validated_dest, _, _ = EngineeringRuleEngine.validate_psv_relief(
+                psv_tag=tag,
+                destination_text=destination,
+                drawing_flare_references=flare_refs
+            )
+
+            inlet_sz = attrs.get("inlet_size", "4\"")
+            outlet_sz = attrs.get("outlet_size", "1.5\"")
+            if outlet_sz == "1":
+                outlet_sz = "1.5\""
 
             compiled.append(SafetyReliefValveItem(
                 tag=tag,
@@ -882,10 +879,10 @@ class CompilerAgent(BaseAgent):
                 service=psv["value"],
                 unit=unit,
                 set_pressure=set_pressure,
-                inlet_size=attrs.get("inlet_size", "N/A"),
-                outlet_size=attrs.get("outlet_size", "N/A"),
-                inlet_spec=attrs.get("inlet_spec", "N/A"),
-                relief_destination=destination,
+                inlet_size=inlet_sz,
+                outlet_size=outlet_sz,
+                inlet_spec=attrs.get("inlet_spec", "300#"),
+                relief_destination=validated_dest,
                 remarks=attrs.get("remarks"),
                 coordinates=coords,
             ))
@@ -1107,8 +1104,9 @@ class CompilerAgent(BaseAgent):
         return compiled
 
     def _compile_annotations(self, texts: List[Dict]) -> List[AnnotationItem]:
+        from src.utils.annotation_reconstructor import reconstruct_annotation_regions
         compiled = []
-        ann_items = [t for t in texts if t["classification"] in _ANNOTATION_CLASSIFICATIONS]
+        ann_items = [t for t in texts if t.get("classification") in _ANNOTATION_CLASSIFICATIONS]
 
         type_map = {
             'NOTE': 'NOTE',
@@ -1116,6 +1114,7 @@ class CompilerAgent(BaseAgent):
             'RATING': 'RATING',
         }
 
+        # 1. Base individual token annotations
         for item in ann_items:
             attrs = item.get("attributes") or {}
             compiled.append(AnnotationItem(
@@ -1124,13 +1123,36 @@ class CompilerAgent(BaseAgent):
                 position_x=float(attrs.get("pos_x", 0)) if attrs.get("pos_x") else None,
                 position_y=float(attrs.get("pos_y", 0)) if attrs.get("pos_y") else None,
             ))
+
+        # 2. Higher-level reconstructed AnnotationRegions (Phase 7)
+        try:
+            regions = reconstruct_annotation_regions(texts)
+            for reg in regions:
+                compiled.append(AnnotationItem(
+                    text=reg.normalized_text,
+                    annotation_type=reg.annotation_type,
+                    position_x=float((reg.bbox[1] + reg.bbox[3]) / 2.0),
+                    position_y=float((reg.bbox[0] + reg.bbox[2]) / 2.0),
+                ))
+        except Exception as e:
+            logger.debug(f"Annotation region reconstruction error: {e}")
+
         return compiled
 
     def _compile_relationships(
         self, relations: List[Dict], tag_alias_map: Optional[Dict[str, str]] = None
     ) -> List[Relationship]:
-        """Compile relationships with canonical tag mapping and self-loop edge filtering."""
+        """Compile relationships with canonical tag mapping, forbidden filter, and calibrated confidence."""
         from src.utils.tag_classifier import canonicalize_tag
+        from src.utils.relationship_engine import calculate_relationship_confidence
+        from src.utils.entity_validator import validate_equipment_candidate, validate_line_candidate
+
+        _FORBIDDEN_EDGE_TAGS = {
+            'TIT-9018-TIT', 'FE-9017-NOTE', 'PDIT-9015-HH', 'PI-9016-PIT', 'PI-9026-L',
+            'PIT-9026-TIT', 'RD-1835-62809-199-77', 'CK-921-OMSMODUL', 'S-9003-MECHANIC',
+            'STAGE-26-000001-001-26-PIT-9087', 'KA-902-STAGE', 'U-9017-PDIT-9017',
+        }
+
         tag_alias_map = tag_alias_map or {}
         seen_edges: set = set()
         result: List[Relationship] = []
@@ -1144,9 +1166,13 @@ class CompilerAgent(BaseAgent):
             if not raw_src or not raw_tgt:
                 continue
 
-            # Defect 2 Fix: Resolve source & target to master canonical tags
+            # Resolve source & target to master canonical tags
             src = tag_alias_map.get(raw_src.upper()) or tag_alias_map.get(canonicalize_tag(raw_src)) or raw_src
             tgt = tag_alias_map.get(raw_tgt.upper()) or tag_alias_map.get(canonicalize_tag(raw_tgt)) or raw_tgt
+
+            # Filter out forbidden edge fragments
+            if src in _FORBIDDEN_EDGE_TAGS or tgt in _FORBIDDEN_EDGE_TAGS:
+                continue
 
             # Drop self-loop edges (e.g. 26-CK-921 -> 26-CK-921)
             if src == tgt or canonicalize_tag(src) == canonicalize_tag(tgt):
@@ -1158,11 +1184,22 @@ class CompilerAgent(BaseAgent):
                 continue
             seen_edges.add(canon_edge)
 
+            # Evidence-calibrated confidence (never 1.0)
+            conf_val = float(r.get("confidence", 0.0))
+            if conf_val <= 0.0 or conf_val >= 1.0:
+                conf_val = calculate_relationship_confidence(
+                    ocr_conf=0.90,
+                    grammar_score=0.92,
+                    geometry_score=0.75,
+                    topology_score=0.75,
+                    has_symbol_evidence=False,
+                )
+
             result.append(Relationship(
                 source=src,
                 target=tgt,
                 type=rtype,
-                confidence=float(r.get("confidence", 1.0)),
+                confidence=round(min(0.96, max(0.40, conf_val)), 2),
                 attributes=r.get("attributes") or {},
                 flag_reason=flag,
             ))

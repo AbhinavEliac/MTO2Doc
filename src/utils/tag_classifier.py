@@ -584,12 +584,13 @@ def classify_paddle_results(
 
         # PSV tags
         for m in _PSV_SEARCH.finditer(t):
-            tag = m.group(1).upper()
+            from src.utils.entity_validator import normalize_psv_tag
+            tag = normalize_psv_tag(m.group(1))
             if tag not in found:
                 found[tag] = _make_item(tag, 'PSV_TAG', conf, item)
                 item_added = True
 
-        # Line tags — Defect 4: strip NOTE refs, validate pipe size
+        # Line tags — Defect 4: strip NOTE refs, validate pipe size and line grammar
         for m in _LINE_SEARCH.finditer(t):
             raw_tag = m.group(1)
             # Strip NOTE xx references before processing
@@ -602,40 +603,22 @@ def classify_paddle_results(
             if re.search(r'(?:SAMPLE|DWG|DRAWING|DOC|REF|SHEET|PAGE|JPG|PNG|PDF)', tag, re.IGNORECASE):
                 continue
 
-            # Guard against equipment tags without size prefix (e.g. HA-911-C01, 26-KA-901-M01, 26-ST-9002)
-            parts = tag.split('-')
-            has_explicit_size = bool(parts and ('"' in parts[0] or "'" in parts[0] or '/' in parts[0] or 'MM' in parts[0] or 'DN' in parts[0]))
-            if len(parts) >= 2:
-                # Bare equipment e.g. HA-911-C01, KA-902, TK-101
-                if parts[0] in (_EQUIP_PREFIX_ALLOWLIST | _EQUIPMENT_CODES):
-                    continue
-                # Area-prefixed equipment e.g. 26-KA-901-M01, 26-HA-911-C01, 26-ST-9002, 26-KZ-901
-                if len(parts) >= 3 and parts[0].isdigit() and len(parts[0]) == 2 and not has_explicit_size:
-                    if parts[1] in (_EQUIP_PREFIX_ALLOWLIST | _EQUIPMENT_CODES):
-                        continue
-                # Guard against valve tags being misclassified as lines (e.g. 29"-EF-96470, EF-96470)
-                svc_code = parts[1] if has_explicit_size and len(parts) >= 2 else parts[0]
-                if svc_code in _KNOWN_VALVE_PREFIXES:
-                    continue
+            from src.utils.entity_validator import validate_line_candidate
+            line_cand = validate_line_candidate(tag)
+            if not line_cand.is_valid:
+                # Do not emit false strings as lines
+                continue
 
             flag_reason = None
             tag_conf = conf
             size_valid, size_flag = _validate_line_tag_size(tag)
             if not size_valid:
-                # Defect 4 Fix: Reject corrupt line size from LINE_TAG list emission
-                demoted_item = _make_item(
-                    tag, 'NOTE', 0.25, item,
-                    flag_reason=size_flag or 'size_out_of_range'
-                )
-                found[tag] = demoted_item
-                item_added = True
                 continue
 
             if size_flag:
                 flag_reason = size_flag
                 tag_conf = min(conf, 0.75)
             if raw_tag_clean != raw_tag.strip():
-                # NOTE was stripped — record it
                 note_ref = _NOTE_REF_STRIP_RE.search(raw_tag)
                 if note_ref and not flag_reason:
                     flag_reason = f'note_ref_stripped({note_ref.group().strip()})'
@@ -702,6 +685,14 @@ def classify_paddle_results(
             else:
                 cat = 'EQUIPMENT_TAG'
 
+            if cat == 'EQUIPMENT_TAG':
+                from src.utils.entity_validator import validate_equipment_candidate
+                if not validate_equipment_candidate(full_tag).is_valid:
+                    continue
+            elif cat == 'INSTRUMENT_TAG':
+                from src.utils.entity_validator import normalize_instrument_tag
+                full_tag = normalize_instrument_tag(full_tag)
+
             if full_tag not in found:
                 it_copy = dict(item)
                 if is_ref_context:
@@ -712,12 +703,9 @@ def classify_paddle_results(
         # Bare equipment tags without project prefix (e.g. KA-902, KA-901, CX-9021, CX-9011, HA-911, TK-901, FA-9015)
         for m in _GENERIC_EQUIP_PATTERN.finditer(t):
             full_tag = m.group(1).upper()
-            code_m = re.match(r'^([A-Z]{1,3})', full_tag)
-            code = code_m.group(1) if code_m else ""
-            if (code in _EQUIP_PREFIX_ALLOWLIST
-                    and not _EQUIP_REJECT_PATTERN.match(full_tag)
-                    and not _SPEC_CODE_PATTERN.match(full_tag)
-                    and not _SERVICE_CODE_PATTERN.match(full_tag)):
+            from src.utils.entity_validator import validate_equipment_candidate
+            eq_cand = validate_equipment_candidate(full_tag)
+            if eq_cand.is_valid:
                 if full_tag not in found:
                     it_copy = dict(item)
                     if is_ref_context:
@@ -727,7 +715,9 @@ def classify_paddle_results(
 
         # Bare instrument tags — Defect 3: setpoint negative-context guard for 3-digit setpoints
         for m in _BARE_INSTRUMENT_SEARCH.finditer(t):
-            tag = m.group(1).upper()
+            raw_inst = m.group(1).upper()
+            from src.utils.entity_validator import normalize_instrument_tag
+            tag = normalize_instrument_tag(raw_inst)
             if tag in found:
                 continue
             seq_num = re.sub(r'\D', '', tag)

@@ -322,9 +322,10 @@ def stitch_symbol_bubbles(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Stitches multi-line text vertically stacked inside equipment and instrument symbols
     (circles, squares, and circle-in-a-square DCS / PLC combo symbols).
-    Captures text above, middle, and below, joining them with hyphens:
-      {text_above}-{middle_text}-{text_below}
-    to form complete, uniquely identified equipment and instrument tags.
+    Strictly validates that the resulting composite matches standard tag grammar:
+      [UNIT-]TYPE-NUMBER
+    Prevents table columns (RD-1835-...), notes (FE-9017-NOTE), and alarms (PDIT-9015-HH)
+    from being stitched into malformed tags.
     """
     if not items:
         return []
@@ -335,71 +336,93 @@ def stitch_symbol_bubbles(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     used = set()
     assembled = []
 
+    _DISALLOWED_TOKENS = {
+        'NOTE', 'NOTES', 'PLEASE', 'TOLERANCE', 'DRAWING', 'VALVES', 'CLOSED VESSEL',
+        'TEMPERATURE', 'ALL FIXTURES', 'HH', 'LL', 'H', 'L', 'SD', 'TRIP', 'ALARM',
+        'STAGE', 'GAS', 'OIL', 'AIR', 'WATER', 'COOLING', 'SUPPLY', 'TAG', 'SERVICE',
+        'DUTY', 'FLOW', 'DISCHARGE', 'SUCTION', 'MATERIAL', 'QUANTITY', 'VENDOR',
+        'PRESSURE', 'TEMPERATURE', 'MODULE', 'OMSMODUL', 'DRAIN', 'REF', 'DWG',
+    }
+
     for i in range(n):
         if i in used:
             continue
         it1 = sorted_items[i]
-        t1 = str(it1.get('text', '')).strip()
+        t1 = str(it1.get('text', '')).strip().upper()
         cx1 = float(it1.get('center_x', 0))
         cy1 = float(it1.get('center_y', 0))
 
-        # Skip long notes / descriptions
-        if len(t1) > 16 or any(w in t1.upper() for w in ['NOTE', 'PLEASE', 'TOLERANCE', 'DRAWING', 'VALVES', 'CLOSED VESSEL', 'TEMPERATURE', 'ALL FIXTURES']):
+        if len(t1) > 10 or t1 in _DISALLOWED_TOKENS or any(w in t1 for w in ('NOTE', 'STAGE', 'DRAWING')):
             continue
 
-        # Look for tokens vertically stacked with i (same X column within 0.015, Y gap within 0.038)
+        # Look for tokens vertically stacked with i (same X column within 0.012, Y gap within 0.035)
         group = [i]
         curr_y = cy1
         for j in range(n):
             if j == i or j in used or j in group:
                 continue
             it2 = sorted_items[j]
-            t2 = str(it2.get('text', '')).strip()
-            if len(t2) > 16 or any(w in t2.upper() for w in ['NOTE', 'PLEASE', 'TOLERANCE', 'DRAWING']):
+            t2 = str(it2.get('text', '')).strip().upper()
+            if len(t2) > 10 or t2 in _DISALLOWED_TOKENS or any(w in t2 for w in ('NOTE', 'STAGE', 'DRAWING')):
                 continue
             cx2 = float(it2.get('center_x', 0))
             cy2 = float(it2.get('center_y', 0))
             
-            # Check if j is directly below curr_y within vertical bubble/symbol boundary
-            if abs(cx1 - cx2) <= 0.015 and 0.003 <= (cy2 - curr_y) <= 0.038:
+            # Check if j is directly below curr_y within vertical bubble boundary
+            if abs(cx1 - cx2) <= 0.012 and 0.003 <= (cy2 - curr_y) <= 0.035:
                 group.append(j)
                 curr_y = cy2
 
-        if len(group) >= 2:
+        if 2 <= len(group) <= 3:
             # Sort group vertically from top to bottom
             group.sort(key=lambda idx: float(sorted_items[idx].get('center_y', 0)))
-            tokens = [str(sorted_items[idx].get('text', '')).strip() for idx in group]
+            tokens = [str(sorted_items[idx].get('text', '')).strip().upper() for idx in group]
             
-            # Clean tokens: remove leading/trailing noise, quotes, tildes, hyphens
+            # Clean tokens
             clean_tokens = []
             for tok in tokens:
                 c = re.sub(r'^[~`\'\"#@*_\-\s]+|[~`\'\"#@*_\-\s]+$', '', tok).strip()
-                if c:
+                if c and c not in _DISALLOWED_TOKENS:
                     clean_tokens.append(c)
 
-            if len(clean_tokens) >= 2:
-                for idx in group:
-                    used.add(idx)
+            # Prevent table data columns: if 2+ tokens are pure multi-digit numbers, skip
+            num_tokens = sum(1 for c in clean_tokens if c.isdigit() and len(c) >= 2)
+            if num_tokens >= 2:
+                continue
 
-                # Assemble with hyphens: {top}-{middle}-{bottom}
-                composite_tag = "-".join(clean_tokens)
+            # Handle duplicate tokens (e.g. TIT on top and TIT on bottom with 9018 in between)
+            if len(clean_tokens) == 3 and clean_tokens[0] == clean_tokens[2]:
+                clean_tokens = [clean_tokens[0], clean_tokens[1]]
+
+            if len(clean_tokens) in (2, 3):
+                candidate_tag = "-".join(clean_tokens)
                 
-                min_cx = min(float(sorted_items[idx].get('center_x', 0)) for idx in group)
-                max_cx = max(float(sorted_items[idx].get('center_x', 0)) for idx in group)
-                min_cy = min(float(sorted_items[idx].get('center_y', 0)) for idx in group)
-                max_cy = max(float(sorted_items[idx].get('center_y', 0)) for idx in group)
-                avg_conf = sum(float(sorted_items[idx].get('confidence', 0.9)) for idx in group) / len(group)
+                # Check if matches valid bubble tag: [UNIT-]FUNCTION-NUMBER or [UNIT-]CODE-NUMBER
+                is_valid_bubble = bool(
+                    re.match(r'^(?:(\d{2,3})-)?([A-Z]{2,5})-(\d{3,5}[A-Z]?)$', candidate_tag) or
+                    re.match(r'^(?:(\d{2,3})-)?([A-Z]{1,3})-(\d{2,5}[A-Z]?)$', candidate_tag)
+                )
 
-                new_item = {
-                    'text': composite_tag,
-                    'value': composite_tag,
-                    'tag': composite_tag,
-                    'confidence': round(avg_conf, 3),
-                    'center_x': round((min_cx + max_cx) / 2.0, 4),
-                    'center_y': round((min_cy + max_cy) / 2.0, 4),
-                    'bbox': [[min_cx, min_cy], [max_cx, min_cy], [max_cx, max_cy], [min_cx, max_cy]],
-                    'is_symbol_bubble': True
-                }
-                assembled.append(new_item)
+                if is_valid_bubble:
+                    for idx in group:
+                        used.add(idx)
+
+                    min_cx = min(float(sorted_items[idx].get('center_x', 0)) for idx in group)
+                    max_cx = max(float(sorted_items[idx].get('center_x', 0)) for idx in group)
+                    min_cy = min(float(sorted_items[idx].get('center_y', 0)) for idx in group)
+                    max_cy = max(float(sorted_items[idx].get('center_y', 0)) for idx in group)
+                    avg_conf = sum(float(sorted_items[idx].get('confidence', 0.9)) for idx in group) / len(group)
+
+                    new_item = {
+                        'text': candidate_tag,
+                        'value': candidate_tag,
+                        'tag': candidate_tag,
+                        'confidence': round(avg_conf, 3),
+                        'center_x': round((min_cx + max_cx) / 2.0, 4),
+                        'center_y': round((min_cy + max_cy) / 2.0, 4),
+                        'bbox': [[min_cx, min_cy], [max_cx, min_cy], [max_cx, max_cy], [min_cx, max_cy]],
+                        'is_symbol_bubble': True
+                    }
+                    assembled.append(new_item)
 
     return items + assembled

@@ -122,6 +122,8 @@ def trace_lines_and_connections(
     panels = [t for t in text_elements if t.get("classification") in ("PANEL_TAG", "CIRCUIT_TAG")]
     earthing = [t for t in text_elements if t.get("classification") in ("EARTH_BAR_TAG", "EARTH_PIT_TAG")]
 
+    from src.utils.relationship_engine import calculate_relationship_confidence, EngineeringRuleEngine
+
     # A. Map Valves to Piping Lines (INSTALLED_ON)
     # 1. Tagged valves from text elements
     for v in valves:
@@ -133,28 +135,39 @@ def trace_lines_and_connections(
         seq_match = re.search(r'(\d{3,5})', vtag)
         seq_num = seq_match.group(1) if seq_match else None
         target_line = None
+        is_seq = False
 
         if seq_num:
             for litem in line_items:
                 ltag = litem.get("tag", "")
                 if seq_num in ltag:
                     target_line = ltag
+                    is_seq = True
                     break
 
         if not target_line:
             vattrs = v.get("attributes") or {}
             vx = float(vattrs.get("pos_x", 0.5)) if vattrs.get("pos_x") else 0.5
             vy = float(vattrs.get("pos_y", 0.5)) if vattrs.get("pos_y") else 0.5
-            target_line = _find_closest_line_segment(vx, vy, traces, line_items, max_dist=0.45)
+            target_line = _find_closest_line_segment(vx, vy, traces, line_items, max_dist=0.15)
 
         if target_line:
             rkey = (vtag, target_line, "INSTALLED_ON")
             if rkey not in existing_rels:
                 existing_rels.add(rkey)
+                conf = calculate_relationship_confidence(
+                    ocr_conf=0.92,
+                    grammar_score=0.95,
+                    geometry_score=0.85 if is_seq else 0.70,
+                    topology_score=0.85,
+                    has_symbol_evidence=False,
+                    is_tag_sequence_matched=is_seq,
+                )
                 relations.append({
                     "source_tag": vtag,
                     "target_tag": target_line,
-                    "rel_type": "INSTALLED_ON"
+                    "rel_type": "INSTALLED_ON",
+                    "confidence": conf,
                 })
 
     # 2. Untagged valve symbols from symbols detections
@@ -168,22 +181,29 @@ def trace_lines_and_connections(
             stag = sym.get("inferred_tag")
             if not stag:
                 continue
-            # If relationship already registered for this valve tag, skip
             if any(r["source_tag"] == stag and r["rel_type"] == "INSTALLED_ON" for r in relations):
                 continue
 
             sy = (sym.get("ymin", 0.5) + sym.get("ymax", 0.5)) / 2.0
             sx = (sym.get("xmin", 0.5) + sym.get("xmax", 0.5)) / 2.0
 
-            target_line = _find_closest_line_segment(sx, sy, traces, line_items, max_dist=0.40)
+            target_line = _find_closest_line_segment(sx, sy, traces, line_items, max_dist=0.12)
             if target_line:
                 rkey = (stag, target_line, "INSTALLED_ON")
                 if rkey not in existing_rels:
                     existing_rels.add(rkey)
+                    conf = calculate_relationship_confidence(
+                        ocr_conf=0.88,
+                        grammar_score=0.90,
+                        geometry_score=0.75,
+                        topology_score=0.75,
+                        has_symbol_evidence=True,
+                    )
                     relations.append({
                         "source_tag": stag,
                         "target_tag": target_line,
-                        "rel_type": "INSTALLED_ON"
+                        "rel_type": "INSTALLED_ON",
+                        "confidence": conf,
                     })
 
     # B. Map Instruments to Piping Lines or Equipment (MONITORS)
@@ -192,10 +212,10 @@ def trace_lines_and_connections(
         if not itag:
             continue
 
-        # Extract sequence loop number (e.g. 9087 from 26-PIT-9087, 0001 from 27-PIT-0001B)
         loop_match = re.search(r'(\d{3,5})', re.sub(r'^\d{2,3}-', '', itag))
         seq_num = loop_match.group(1) if loop_match else None
         target_entity = None
+        is_seq = False
 
         # 1. Exact loop ID match to a piping line
         if seq_num:
@@ -203,6 +223,7 @@ def trace_lines_and_connections(
                 ltag = litem.get("tag", "")
                 if seq_num in ltag:
                     target_entity = ltag
+                    is_seq = True
                     break
 
         # 2. Extract instrument coordinates
@@ -214,34 +235,30 @@ def trace_lines_and_connections(
         if not target_entity:
             target_entity = _find_closest_line_segment(ix, iy, traces, line_items, max_dist=0.10)
 
-        # 4. Spatial line tag proximity fallback
+        # 4. Direct equipment nozzle proximity (tight threshold only)
         if not target_entity:
-            target_entity = _find_closest_tag(ix, iy, line_items, max_dist=0.25)
-
-        # 5. Direct equipment nozzle or equipment proximity fallback
-        if not target_entity:
-            target_entity = _find_closest_tag(ix, iy, equipment, max_dist=0.30)
-
-        # 6. Global drawing equipment/line fallback (guarantees zero orphan instruments)
-        if not target_entity:
-            if equipment:
-                area_prefix = itag.split('-')[0] if '-' in itag and itag.split('-')[0].isdigit() else ""
-                same_area_eq = [e.get("tag") for e in equipment if area_prefix and e.get("tag", "").startswith(area_prefix)]
-                target_entity = same_area_eq[0] if same_area_eq else equipment[0].get("tag")
-            elif line_items:
-                target_entity = line_items[0].get("tag")
+            target_entity = _find_closest_tag(ix, iy, equipment, max_dist=0.12)
 
         if target_entity:
             rkey = (itag, target_entity, "MONITORS")
             if rkey not in existing_rels:
                 existing_rels.add(rkey)
+                conf = calculate_relationship_confidence(
+                    ocr_conf=0.90,
+                    grammar_score=0.95,
+                    geometry_score=0.85 if is_seq else 0.70,
+                    topology_score=0.80,
+                    has_symbol_evidence=False,
+                    is_tag_sequence_matched=is_seq,
+                )
                 relations.append({
                     "source_tag": itag,
                     "target_tag": target_entity,
-                    "rel_type": "MONITORS"
+                    "rel_type": "MONITORS",
+                    "confidence": conf,
                 })
 
-    # C. Map PSVs to Host Piping Lines & Relief Destinations (Eliminates distant equipment false snapping)
+    # C. Map PSVs to Host Piping Lines & Relief Destinations
     for psv in psvs:
         ptag = psv.get("tag")
         if not ptag:
@@ -250,7 +267,7 @@ def trace_lines_and_connections(
         px = float(pattrs.get("pos_x", 0.5)) if pattrs.get("pos_x") else 0.5
         py = float(pattrs.get("pos_y", 0.5)) if pattrs.get("pos_y") else 0.5
 
-        # 1. PSVs are physically installed on Process Piping Lines (prioritize vector line trace)
+        # 1. PSVs installed on Process Piping Lines
         closest_line = _find_closest_line_segment(px, py, traces, line_items, max_dist=0.08)
         if closest_line:
             rkey = (ptag, closest_line, "INSTALLED_ON")
@@ -259,11 +276,11 @@ def trace_lines_and_connections(
                 relations.append({
                     "source_tag": ptag,
                     "target_tag": closest_line,
-                    "rel_type": "INSTALLED_ON"
+                    "rel_type": "INSTALLED_ON",
+                    "confidence": 0.92,
                 })
         else:
-            # Direct vessel nozzle top mount (tight threshold only)
-            closest_eq = _find_closest_tag(px, py, equipment, max_dist=0.04)
+            closest_eq = _find_closest_tag(px, py, equipment, max_dist=0.06)
             if closest_eq:
                 rkey = (ptag, closest_eq, "INSTALLED_ON")
                 if rkey not in existing_rels:
@@ -271,18 +288,26 @@ def trace_lines_and_connections(
                     relations.append({
                         "source_tag": ptag,
                         "target_tag": closest_eq,
-                        "rel_type": "INSTALLED_ON"
+                        "rel_type": "INSTALLED_ON",
+                        "confidence": 0.85,
                     })
 
         # 2. Discharge Relief Destination Header (HP Flare Header)
-        relief_dest = pattrs.get("relief_destination") or "HP Flare Header"
-        rkey_dest = (ptag, relief_dest, "RELIEVES_TO")
+        raw_dest = pattrs.get("relief_destination") or ""
+        flare_refs = {t.get("value", "").upper() for t in text_elements if "FLARE" in t.get("value", "").upper()}
+        validated_dest, dest_conf, _ = EngineeringRuleEngine.validate_psv_relief(
+            psv_tag=ptag,
+            destination_text=raw_dest,
+            drawing_flare_references=flare_refs
+        )
+        rkey_dest = (ptag, validated_dest, "RELIEVES_TO")
         if rkey_dest not in existing_rels:
             existing_rels.add(rkey_dest)
             relations.append({
                 "source_tag": ptag,
-                "target_tag": relief_dest,
-                "rel_type": "RELIEVES_TO"
+                "target_tag": validated_dest,
+                "rel_type": "RELIEVES_TO",
+                "confidence": dest_conf,
             })
 
     # D. Map Lines to Equipment Endpoint Nozzles (CONNECTS_TO)
@@ -295,7 +320,7 @@ def trace_lines_and_connections(
         lx = float(lattrs.get("pos_x", 0.5)) if lattrs.get("pos_x") else 0.5
         ly = float(lattrs.get("pos_y", 0.5)) if lattrs.get("pos_y") else 0.5
 
-        closest_eq = _find_closest_tag(lx, ly, equipment, max_dist=0.45)
+        closest_eq = _find_closest_tag(lx, ly, equipment, max_dist=0.16)
         if closest_eq:
             rkey = (ltag, closest_eq, "CONNECTS_TO")
             if rkey not in existing_rels:
@@ -303,7 +328,8 @@ def trace_lines_and_connections(
                 relations.append({
                     "source_tag": ltag,
                     "target_tag": closest_eq,
-                    "rel_type": "CONNECTS_TO"
+                    "rel_type": "CONNECTS_TO",
+                    "confidence": 0.82,
                 })
 
     # E. Map Electrical Panels to Circuits/Luminaires (FEEDS) — un-gated for all drawings
