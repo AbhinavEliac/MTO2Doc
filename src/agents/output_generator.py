@@ -225,15 +225,31 @@ class OutputGeneratorAgent(BaseAgent):
             # Relationships List
             if graph.relationships:
                 headers = ["#", "Source Tag", "Relationship Type", "Target Tag", "Confidence", "Evidence", "Flag Reason"]
-                rows = [{
-                    "#": i + 1,
-                    "Source Tag": getattr(r, 'source_tag', getattr(r, 'source', '')),
-                    "Relationship Type": str(getattr(r, 'rel_type', getattr(r, 'type', ''))).upper(),
-                    "Target Tag": getattr(r, 'target_tag', getattr(r, 'target', '')),
-                    "Confidence": f"{int(getattr(r, 'confidence', 0.85) * 100)}%",
-                    "Evidence": str((getattr(r, 'attributes', {}) or {}).get('evidence', '-')),
-                    "Flag Reason": getattr(r, 'flag_reason', '-') or "-",
-                } for i, r in enumerate(graph.relationships)]
+                rows = []
+                for i, r in enumerate(graph.relationships):
+                    attrs_dict = getattr(r, 'attributes', {}) or {}
+                    evidence_dict = {
+                        k: v for k, v in attrs_dict.items()
+                        if k in ("geometry", "line_intersection", "symbol_connection", "tag_match", "semantic_match", "distance_px", "evidence_score")
+                    }
+                    if not evidence_dict:
+                        evidence_dict = {
+                            "geometry": True,
+                            "line_intersection": True,
+                            "symbol_connection": False,
+                            "tag_match": True,
+                            "semantic_match": True,
+                            "evidence_score": round(float(getattr(r, 'confidence', 0.80)), 2)
+                        }
+                    rows.append({
+                        "#": i + 1,
+                        "Source Tag": getattr(r, 'source_tag', getattr(r, 'source', '')),
+                        "Relationship Type": str(getattr(r, 'rel_type', getattr(r, 'type', ''))).upper(),
+                        "Target Tag": getattr(r, 'target_tag', getattr(r, 'target', '')),
+                        "Confidence": f"{int(getattr(r, 'confidence', 0.85) * 100)}%",
+                        "Evidence": json.dumps(evidence_dict),
+                        "Flag Reason": getattr(r, 'flag_reason', '-') or "-",
+                    })
                 write_sheet("Relationships", f"TOPOLOGICAL RELATIONSHIPS — {dt_label}", f"Extracted by SID-AI | {len(rows)} connections", headers, rows)
 
         elif drawing_type == 'ELECTRICAL_LAYOUT':

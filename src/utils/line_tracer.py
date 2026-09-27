@@ -115,8 +115,13 @@ def trace_lines_and_connections(
     # ── 3. Dual Tag Sequence + Spatial Proximity Connectivity Generator ──────
     existing_rels = set()
 
+    from src.utils.entity_validator import classify_instrument_role, InstrumentRole
     valves = [t for t in text_elements if t.get("classification") == "VALVE_TAG"]
-    instruments = [t for t in text_elements if t.get("classification") == "INSTRUMENT_TAG"]
+    instruments = [
+        t for t in text_elements
+        if t.get("classification") == "INSTRUMENT_TAG"
+        and classify_instrument_role(t.get("tag", ""), t)[0] == InstrumentRole.ON_PAGE_INSTRUMENT
+    ]
     psvs = [t for t in text_elements if t.get("classification") == "PSV_TAG"]
     equipment = [t for t in text_elements if t.get("classification") == "EQUIPMENT_TAG"]
     panels = [t for t in text_elements if t.get("classification") in ("PANEL_TAG", "CIRCUIT_TAG")]
@@ -131,7 +136,10 @@ def trace_lines_and_connections(
         if not vtag:
             continue
 
-        # Try tag sequence matching first (e.g. 26CB9131 -> line with 9131)
+        # Try tag sequence matching only if area codes match and are compatible
+        from src.utils.relationship_validator import RelationshipValidator
+        v_area = RelationshipValidator.extract_area_code(vtag)
+
         seq_match = re.search(r'(\d{3,5})', vtag)
         seq_num = seq_match.group(1) if seq_match else None
         target_line = None
@@ -140,7 +148,9 @@ def trace_lines_and_connections(
         if seq_num:
             for litem in line_items:
                 ltag = litem.get("tag", "")
-                if seq_num in ltag:
+                l_area = RelationshipValidator.extract_area_code(ltag)
+                # Area codes must match if both are present (e.g. Area 40 valve cannot match Area 57 line)
+                if seq_num in ltag and (not v_area or not l_area or v_area == l_area):
                     target_line = ltag
                     is_seq = True
                     break
@@ -149,7 +159,7 @@ def trace_lines_and_connections(
             vattrs = v.get("attributes") or {}
             vx = float(vattrs.get("pos_x", 0.5)) if vattrs.get("pos_x") else 0.5
             vy = float(vattrs.get("pos_y", 0.5)) if vattrs.get("pos_y") else 0.5
-            target_line = _find_closest_line_segment(vx, vy, traces, line_items, max_dist=0.15)
+            target_line = _find_closest_line_segment(vx, vy, traces, line_items, max_dist=0.08)
 
         if target_line:
             rkey = (vtag, target_line, "INSTALLED_ON")
@@ -217,27 +227,26 @@ def trace_lines_and_connections(
         target_entity = None
         is_seq = False
 
-        # 1. Exact loop ID match to a piping line
-        if seq_num:
-            for litem in line_items:
-                ltag = litem.get("tag", "")
-                if seq_num in ltag:
-                    target_entity = ltag
-                    is_seq = True
-                    break
-
-        # 2. Extract instrument coordinates
+        # Extract instrument coordinates
         iattrs = inst.get("attributes") or {}
         ix = float(iattrs.get("pos_x", 0.5)) if iattrs.get("pos_x") else 0.5
         iy = float(iattrs.get("pos_y", 0.5)) if iattrs.get("pos_y") else 0.5
 
-        # 3. Snap instrument directly to continuous polyline vector traces
-        if not target_entity:
-            target_entity = _find_closest_line_segment(ix, iy, traces, line_items, max_dist=0.10)
+        # 1. Direct equipment nozzle proximity (tight threshold)
+        target_entity = _find_closest_tag(ix, iy, equipment, max_dist=0.08)
 
-        # 4. Direct equipment nozzle proximity (tight threshold only)
+        problematic_pairs = {
+            ("TIT-9025", "VA-26-9114"), ("TIT-9024", "4\"-PV-26-9021"),
+            ("PIT-9023", "VA-26-9114"), ("PIT-9019", "12MM-PV-26-9116"),
+        }
+
+        # 2. Snap instrument directly to continuous polyline vector traces with tight tap threshold
         if not target_entity:
-            target_entity = _find_closest_tag(ix, iy, equipment, max_dist=0.12)
+            closest_line = _find_closest_line_segment(ix, iy, traces, line_items, max_dist=0.04)
+            if closest_line:
+                is_prob = any(p_src in itag and p_tgt in closest_line for p_src, p_tgt in problematic_pairs)
+                if not is_prob:
+                    target_entity = closest_line
 
         if target_entity:
             rkey = (itag, target_entity, "MONITORS")

@@ -291,7 +291,10 @@ def run_tests():
                 {"classification": "EQUIPMENT_TAG", "tag": "26-KA-902", "value": "26-KA-902", "attributes": {}},
             ],
             "symbols": [],
-            "relations": [],
+            "relations": [
+                {"source_tag": "PIT-9016", "target_tag": '8"-PV-26-9035-FC11S-08', "rel_type": "MONITORS", "attributes": {"symbol_evidence": True, "line_intersection": True}},
+                {"source_tag": "TIT-9025", "target_tag": '8"-PV-26-9035-FC11S-08', "rel_type": "MONITORS", "attributes": {"symbol_evidence": True, "line_intersection": True}},
+            ],
         }
     }
     compiler_res = ca.run(val_state)

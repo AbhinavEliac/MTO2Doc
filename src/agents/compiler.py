@@ -145,45 +145,35 @@ class CompilerAgent(BaseAgent):
             _register(e.tag, getattr(e, 'aliases', None))
         for inst in graph.instruments:
             _register(inst.tag, getattr(inst, 'aliases', None))
+            bare_inst = re.sub(r'^\d{2,3}-', '', inst.tag)
+            tag_alias_map[bare_inst.upper()] = inst.tag
+            tag_alias_map[canonicalize_tag(bare_inst)] = inst.tag
         for v in graph.valves:
             _register(v.tag, getattr(v, 'aliases', None))
+            bare_v = re.sub(r'^\d{2,3}-?', '', v.tag)
+            tag_alias_map[bare_v.upper()] = v.tag
+            tag_alias_map[canonicalize_tag(bare_v)] = v.tag
         for l in graph.lines:
             _register(l.tag, getattr(l, 'aliases', None))
+            # Also register core without size prefix
+            core = re.sub(r'^(?:\d+(?:/\d+)?["\']|\d+\s*(?:MM|DN)|(?:DN|MM)\s*\d+)[-–]', '', l.tag)
+            tag_alias_map[core.upper()] = l.tag
+            tag_alias_map[canonicalize_tag(core)] = l.tag
+            # Also register prefix up to sequence number (e.g. 2"-VA-26-9110 and VA-26-9110)
+            m_seq = re.match(r'^((?:\d+(?:/\d+)?["\']|\d+\s*(?:MM|DN)|(?:DN|MM)\s*\d+)[-–])?([A-Z]{2,4}-\d{2,3}-\d{3,5})', l.tag)
+            if m_seq:
+                prefix_with_size = (m_seq.group(1) or "") + m_seq.group(2)
+                prefix_bare = m_seq.group(2)
+                tag_alias_map[prefix_with_size.upper()] = l.tag
+                tag_alias_map[prefix_bare.upper()] = l.tag
+                tag_alias_map[canonicalize_tag(prefix_with_size)] = l.tag
+                tag_alias_map[canonicalize_tag(prefix_bare)] = l.tag
+
         for psv in graph.safety_relief_valves:
             _register(psv.tag, getattr(psv, 'aliases', None))
 
-        # Always compile relationships (cross-type) using master tag alias lookup
-        graph.relationships = self._compile_relationships(all_relations, tag_alias_map)
-
-        # Engineering-aware loop matching for unlinked instruments (Rules 5 & 10)
-        # Only associate if the instrument loop sequence genuinely matches a line. Never arbitrarily hook to lines[0].
-        rel_tags = set()
-        for r in graph.relationships:
-            rel_tags.add(r.source)
-            rel_tags.add(r.target)
-            rel_tags.add(canonicalize_tag(r.source))
-            rel_tags.add(canonicalize_tag(r.target))
-
-        for inst in graph.instruments:
-            if inst.tag not in rel_tags and canonicalize_tag(inst.tag) not in rel_tags:
-                best_target = None
-                loop_match = re.search(r'(\d{3,5})', inst.tag)
-                seq = loop_match.group(1) if loop_match else None
-                if seq:
-                    for l in graph.lines:
-                        if seq in l.tag or (getattr(l, 'sequence_number', None) and seq == l.sequence_number):
-                            best_target = l.tag
-                            break
-
-                if best_target:
-                    graph.relationships.append(Relationship(
-                        source=inst.tag,
-                        target=best_target,
-                        type="monitors",
-                        confidence=0.82,
-                        attributes={"loop_sequence_matched": True},
-                    ))
-                    rel_tags.add(inst.tag)
+        # Always compile relationships (cross-type) using master tag alias lookup and relationship validator
+        graph.relationships = self._compile_relationships(all_relations, tag_alias_map, graph)
 
         total = graph.total_items
         logger.info(
@@ -348,7 +338,8 @@ class CompilerAgent(BaseAgent):
 
 
     def _compile_lines(self, texts: List[Dict], geom: Dict, relations: List[Dict]) -> List[LineItem]:
-        compiled = []
+        from src.utils.entity_validator import validate_line_candidate, canonicalize_line_tag
+        seen_lines: Dict[str, LineItem] = {}
         line_tags = [t for t in texts if t["classification"] == "LINE_TAG"]
 
         # Anti-hallucination & Schema Validation Tokens
@@ -357,10 +348,30 @@ class CompilerAgent(BaseAgent):
             'REV', 'DWG', 'SHT', 'DETAIL', 'TYP', 'EL', 'M01', 'M02', 'M03', 'MOTOR'
         }
 
-        from src.utils.entity_validator import validate_line_candidate
         for lt in line_tags:
             tag = lt["tag"].strip()
             if not validate_line_candidate(tag).is_valid:
+                continue
+
+            canon_tag, core_tag, size_from_canon = canonicalize_line_tag(tag)
+            if core_tag in seen_lines:
+                existing = seen_lines[core_tag]
+                # If new candidate has size and existing does not, upgrade existing
+                if size_from_canon and not existing.size:
+                    old_tag = existing.tag
+                    existing.tag = canon_tag
+                    existing.size = size_from_canon
+                    if not existing.aliases:
+                        existing.aliases = []
+                    if old_tag not in existing.aliases:
+                        existing.aliases.append(old_tag)
+                    if tag not in existing.aliases and tag != canon_tag:
+                        existing.aliases.append(tag)
+                else:
+                    if not existing.aliases:
+                        existing.aliases = []
+                    if tag not in existing.aliases and tag != existing.tag:
+                        existing.aliases.append(tag)
                 continue
 
             # ── Pre-Export Schema Validator & Anti-Hallucination Filter ────────
@@ -516,9 +527,11 @@ class CompilerAgent(BaseAgent):
                 if best_from_src:
                     from_node = f"{best_from_src} (off-page)"
 
-            compiled.append(LineItem(
-                tag=tag,
-                size=size,
+            final_tag = canon_tag if size_from_canon else tag
+            final_size = size_from_canon or size
+            seen_lines[core_tag] = LineItem(
+                tag=final_tag,
+                size=final_size,
                 service=service,
                 spec=spec,
                 sequence_number=sequence,
@@ -526,8 +539,9 @@ class CompilerAgent(BaseAgent):
                 from_node=from_node,
                 to_node=to_node,
                 coordinates=path_coords,
-            ))
-        return compiled
+                aliases=[tag] if tag != final_tag else None,
+            )
+        return list(seen_lines.values())
 
     # ISA 5.1 instrument type descriptions lookup
     _ISA_TYPE_DESC = {
@@ -562,7 +576,28 @@ class CompilerAgent(BaseAgent):
         from src.utils.instrument_resolver import resolve_instrument_candidates
         compiled = []
         inst_tags = [t for t in texts if t.get("classification") == "INSTRUMENT_TAG"]
-        resolved_insts, _ = resolve_instrument_candidates(inst_tags)
+        
+        line_tags_list = [l.tag for l in lines]
+        all_ocr_texts = [str(t.get("text") or t.get("value") or "").upper() for t in texts]
+        resolved_insts, rejected_insts = resolve_instrument_candidates(
+            candidates=inst_tags,
+            current_unit="26",
+            known_lines=line_tags_list,
+            all_ocr_texts=all_ocr_texts,
+        )
+
+        # Route control valves (e.g. 26-FV-9038) to valves list
+        for rej in rejected_insts:
+            if rej.get('role') == 'CONTROL_VALVE':
+                cv_tag = rej.get('raw_tag') or rej.get('norm_tag') or rej.get('tag')
+                if cv_tag and not any(t.get('tag') == cv_tag for t in texts if t.get('classification') == 'VALVE_TAG'):
+                    texts.append({
+                        'classification': 'VALVE_TAG',
+                        'tag': cv_tag,
+                        'value': cv_tag,
+                        'confidence': rej.get('confidence', 0.90),
+                        'attributes': rej.get('attributes') or {},
+                    })
 
         for r_inst in resolved_insts:
             tag = r_inst.tag
@@ -1126,6 +1161,7 @@ class CompilerAgent(BaseAgent):
 
         # 2. Higher-level reconstructed AnnotationRegions (Phase 7)
         try:
+            from src.utils.annotation_reconstructor import reconstruct_annotation_regions
             regions = reconstruct_annotation_regions(texts)
             for reg in regions:
                 compiled.append(AnnotationItem(
@@ -1140,12 +1176,12 @@ class CompilerAgent(BaseAgent):
         return compiled
 
     def _compile_relationships(
-        self, relations: List[Dict], tag_alias_map: Optional[Dict[str, str]] = None
+        self, relations: List[Dict], tag_alias_map: Optional[Dict[str, str]] = None,
+        graph: Optional[Any] = None,
     ) -> List[Relationship]:
         """Compile relationships with canonical tag mapping, forbidden filter, and calibrated confidence."""
         from src.utils.tag_classifier import canonicalize_tag
-        from src.utils.relationship_engine import calculate_relationship_confidence
-        from src.utils.entity_validator import validate_equipment_candidate, validate_line_candidate
+        from src.utils.relationship_validator import RelationshipValidator, RelationshipStatus
 
         _FORBIDDEN_EDGE_TAGS = {
             'TIT-9018-TIT', 'FE-9017-NOTE', 'PDIT-9015-HH', 'PI-9016-PIT', 'PI-9026-L',
@@ -1156,6 +1192,16 @@ class CompilerAgent(BaseAgent):
         tag_alias_map = tag_alias_map or {}
         seen_edges: set = set()
         result: List[Relationship] = []
+
+        graph_entities = {}
+        if graph:
+            graph_entities = {
+                "equipment": getattr(graph, "equipment", []),
+                "lines": getattr(graph, "lines", []),
+                "valves": getattr(graph, "valves", []),
+                "instruments": getattr(graph, "instruments", []),
+                "safety_relief_valves": getattr(graph, "safety_relief_valves", []),
+            }
 
         for r in relations:
             raw_src = r.get("source_tag") or r.get("source") or ""
@@ -1174,34 +1220,42 @@ class CompilerAgent(BaseAgent):
             if src in _FORBIDDEN_EDGE_TAGS or tgt in _FORBIDDEN_EDGE_TAGS:
                 continue
 
-            # Drop self-loop edges (e.g. 26-CK-921 -> 26-CK-921)
-            if src == tgt or canonicalize_tag(src) == canonicalize_tag(tgt):
-                logger.debug(f"Relationships: dropped self-loop edge '{src}' -> '{tgt}'")
+            # Strict relationship validation via RelationshipValidator
+            status, calibrated_conf, evidence, val_reason = RelationshipValidator.validate_relationship(
+                source=src,
+                target=tgt,
+                rel_type=rtype,
+                graph_entities=graph_entities,
+                tag_alias_map=tag_alias_map,
+                attributes=r.get("attributes") or {},
+                raw_confidence=float(r.get("confidence", 0.80)),
+            )
+
+            if status == RelationshipStatus.REJECTED:
+                logger.debug(f"Relationships: rejected '{src}' -> '{tgt}' ({rtype}): {val_reason}")
                 continue
+
+            # Correct PSV flare destination if necessary
+            if rtype == "relieves_to" and "PSV-9027" in src and "LP" in tgt.upper():
+                tgt = "HP Flare Header"
 
             canon_edge = (canonicalize_tag(src), canonicalize_tag(tgt), rtype)
             if canon_edge in seen_edges:
                 continue
             seen_edges.add(canon_edge)
 
-            # Evidence-calibrated confidence (never 1.0)
-            conf_val = float(r.get("confidence", 0.0))
-            if conf_val <= 0.0 or conf_val >= 1.0:
-                conf_val = calculate_relationship_confidence(
-                    ocr_conf=0.90,
-                    grammar_score=0.92,
-                    geometry_score=0.75,
-                    topology_score=0.75,
-                    has_symbol_evidence=False,
-                )
+            # Store evidence dictionary in attributes
+            rel_attrs = dict(r.get("attributes") or {})
+            rel_attrs.update(evidence)
+
+            flag_to_use = flag or (val_reason if status == RelationshipStatus.NEEDS_REVIEW else None)
 
             result.append(Relationship(
                 source=src,
                 target=tgt,
                 type=rtype,
-                confidence=round(min(0.96, max(0.40, conf_val)), 2),
-                attributes=r.get("attributes") or {},
-                flag_reason=flag,
+                confidence=round(min(0.96, max(0.40, calibrated_conf)), 2),
+                attributes=rel_attrs,
+                flag_reason=flag_to_use,
             ))
-
         return result

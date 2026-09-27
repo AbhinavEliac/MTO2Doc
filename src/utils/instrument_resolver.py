@@ -100,11 +100,18 @@ class ResolvedInstrument:
 
 def resolve_instrument_candidates(
     candidates: List[Dict[str, Any]],
+    current_unit: str = "26",
+    known_lines: Optional[List[str]] = None,
+    all_ocr_texts: Optional[List[str]] = None,
 ) -> Tuple[List[ResolvedInstrument], List[Dict[str, Any]]]:
     """
     Groups raw instrument items by physical loop sequence, resolves primary tags,
     indicators, and alarms, and eliminates synthetic/fragmented duplicates.
+    Strictly filters out non-instruments (Control Valves, Line IDs, Equipment Attributes,
+    External References, and Annotations) using classify_instrument_role.
     """
+    from src.utils.entity_validator import classify_instrument_role, InstrumentRole
+
     # 1. Filter and normalize items
     cleaned_items = []
     rejected_items = []
@@ -122,7 +129,32 @@ def resolve_instrument_candidates(
 
         norm_tag = normalize_instrument_tag(raw_tag)
 
-        # Extract sequence loop digits (e.g. 9026 from PIT-9026, 0001 from 27-PIT-0001B)
+        # Context evaluation for reference and attributes
+        ctx = dict(c.get('attributes') or {})
+        if c.get('is_reference'):
+            ctx['is_reference'] = True
+        if c.get('text'):
+            ctx['text'] = c.get('text')
+
+        # Strict engineering role classification
+        role, role_reason = classify_instrument_role(
+            raw_tag=norm_tag,
+            context=ctx,
+            current_unit=current_unit,
+            known_lines=known_lines,
+            all_ocr_texts=all_ocr_texts,
+        )
+        if role != InstrumentRole.ON_PAGE_INSTRUMENT:
+            rejected_items.append({
+                **c,
+                'raw_tag': raw_tag,
+                'norm_tag': norm_tag,
+                'role': role.value,
+                'rejection_reason': f"{role.value}: {role_reason}",
+            })
+            continue
+
+        # Extract sequence loop digits (e.g. 9026 from PIT-9026)
         loop_match = re.search(r'(\d{3,5})([A-Z]?)', norm_tag)
         if not loop_match:
             # Reject bare letters without loop number

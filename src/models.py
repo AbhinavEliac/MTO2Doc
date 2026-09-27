@@ -45,6 +45,7 @@ class LineItem(BaseModel):
     from_node: Optional[str] = Field(default=None, description="Source tag where the line originates")
     to_node: Optional[str] = Field(default=None, description="Destination tag where the line terminates")
     coordinates: Optional[List[List[float]]] = Field(default=None, description="Polyline path coordinates")
+    aliases: Optional[List[str]] = Field(default=None, description="Alternative tag forms (e.g. without size prefix)")
 
 
 class InstrumentItem(BaseModel):

@@ -36,6 +36,15 @@ class EntityType(str, Enum):
     ANNOTATION = "ANNOTATION"
 
 
+class InstrumentRole(str, Enum):
+    ON_PAGE_INSTRUMENT = "ON_PAGE_INSTRUMENT"
+    EXTERNAL_REFERENCE = "EXTERNAL_REFERENCE"
+    CONTROL_VALVE = "CONTROL_VALVE"
+    LINE_IDENTIFIER = "LINE_IDENTIFIER"
+    EQUIPMENT_ATTRIBUTE = "EQUIPMENT_ATTRIBUTE"
+    ANNOTATION = "ANNOTATION"
+
+
 @dataclass
 class EntityCandidate:
     id: str
@@ -379,3 +388,108 @@ def validate_valve_candidate(raw: str) -> EntityCandidate:
     cand.status = EntityStatus.REJECTED
     cand.rejection_reason = "Fails valve tag grammar"
     return cand
+
+
+def canonicalize_line_tag(raw: str) -> Tuple[str, str, str]:
+    """
+    Parses a raw line tag into (canonical_tag, core_tag, size_prefix).
+    Example:
+      '2"-VA-26-9120-AS20S-00' -> ('2"-VA-26-9120-AS20S-00', 'VA-26-9120-AS20S-00', '2"')
+      'VA-26-9120-AS20S-00'    -> ('VA-26-9120-AS20S-00', 'VA-26-9120-AS20S-00', '')
+    """
+    t = raw.strip().upper()
+    m_size = re.match(r'^((?:\d+(?:/\d+)?["\']|\d+\s*(?:MM|DN)|(?:DN|MM)\s*\d+))[-–](.*)$', t, re.IGNORECASE)
+    if m_size:
+        size_prefix = m_size.group(1).upper()
+        core_tag = m_size.group(2).strip()
+        return f"{size_prefix}-{core_tag}", core_tag, size_prefix
+    return t, t, ""
+
+
+def classify_instrument_role(
+    raw_tag: str,
+    context: Optional[Dict[str, Any]] = None,
+    current_unit: str = "26",
+    known_lines: Optional[List[str]] = None,
+    all_ocr_texts: Optional[List[str]] = None,
+) -> Tuple[InstrumentRole, str]:
+    """
+    Classifies the engineering role of an instrument candidate into:
+    - ON_PAGE_INSTRUMENT
+    - EXTERNAL_REFERENCE
+    - CONTROL_VALVE
+    - LINE_IDENTIFIER
+    - EQUIPMENT_ATTRIBUTE
+    - ANNOTATION
+    """
+    tag = raw_tag.strip().upper()
+    ctx = context or {}
+    known_lines = [l.upper() for l in (known_lines or [])]
+    all_texts = [str(x).upper() for x in (all_ocr_texts or [])]
+
+    # 1. Descriptive Note / Specification Annotation
+    if any(w in tag for w in ('NOTE', 'LTCS', 'OMS', 'MODUL', 'DRAIN', 'SPEC', 'DWG', 'DETAIL')):
+        return InstrumentRole.ANNOTATION, f"Contains annotation/spec keyword in '{tag}'"
+
+    # 2. Control Valve (FV, PV, TV, LV, HV, XV, PCV, FCV, TCV, LCV, SDV, BDV)
+    # Control elements installed on process piping lines belong to Valves catalog, not instrument bubbles
+    # E.g., 26-FV-9038, FV-9038, 26-HV-101
+    m_code = re.search(r'\b(?:(\d{2,3})-)?([A-Z]{2,4})-(\d{2,5}[A-Z]?)\b', tag)
+    if m_code:
+        fcode = m_code.group(2)
+        if fcode in ('FV', 'HV', 'XV', 'CV', 'PCV', 'FCV', 'TCV', 'LCV', 'MOV', 'SDV', 'BDV') or (fcode.endswith('V') and fcode[0] in ('F', 'P', 'T', 'L', 'H', 'X', 'Z', 'B', 'S')):
+            return InstrumentRole.CONTROL_VALVE, f"Control valve / final control element code '{fcode}'"
+
+    # 3. Line Identifier (e.g. 26-AI-63-9000, 26-AI-63-9001, AI-63-9000)
+    # Line identifiers have:
+    # A) Piping service code (e.g. AI = Instrument Air, IA, PA, FG, DO, DC, VF, PV, PL, WC, VA)
+    # B) Two numeric sequences separated by hyphens (e.g. system 63 and sequence 9000: 26-AI-63-9000)
+    m_line_pattern = re.match(r'^(?:(\d{2,3})-)?([A-Z]{2,3})-(\d{2,3})-(\d{3,5}[A-Z]?)(?:-.*)?$', tag)
+    if m_line_pattern:
+        svc = m_line_pattern.group(2)
+        if svc in PIPING_SERVICE_CODES or svc in ('AI', 'IA', 'PA', 'FG', 'FO', 'DO', 'DC', 'VF', 'PV', 'PL', 'WC', 'VA', 'GI'):
+            return InstrumentRole.LINE_IDENTIFIER, f"Matches line identifier structure <service>-<subsystem>-<seq> ('{svc}')"
+
+    # Check if tag is part of a known line (e.g. 'AI-63-9000' in '1"-AI-63-9000-AS20-00')
+    clean_tag_core = re.sub(r'^\d{2,3}-', '', tag)
+    for kl in known_lines:
+        if clean_tag_core in kl or tag in kl:
+            return InstrumentRole.LINE_IDENTIFIER, f"Matches substring of documented piping line '{kl}'"
+
+    # 4. Equipment Attribute / Vessel Trim / Cable Data (e.g. 26-TT-26-9711, TT-26-9711)
+    # Pattern where unit number is duplicated (e.g. 26-TT-26) or matches transmitter cable tag
+    if re.search(r'(\d{2,3})-[A-Z]{2,4}-\1-\d+', tag) or re.match(r'^[A-Z]{2,4}-\d{2}-\d{4,}$', tag):
+        return InstrumentRole.EQUIPMENT_ATTRIBUTE, "Vessel trim / internal equipment sensor or transmitter cable"
+    if ctx.get("source_region") in ("equipment_table", "equipment_trim") or ctx.get("is_vessel_trim"):
+        return InstrumentRole.EQUIPMENT_ATTRIBUTE, "Documented as vessel trim or equipment table data"
+
+    # 5. External Reference (e.g. 27-PIT-0001B, FROM 26-PIT-9087)
+    # A) Text context contains reference indicators
+    raw_ctx_text = str(ctx.get("text", "")).upper()
+    if ctx.get("is_reference") or bool(re.search(r'\b(?:FROM|TO|TIE-IN|CONTINUED\s+ON|SEE\s+DWG|REF\s+DWG|DWG\s+NO)\b', raw_ctx_text)):
+        return InstrumentRole.EXTERNAL_REFERENCE, "Context indicates external tie-in or drawing continuation"
+
+    # Check if any OCR text containing this tag starts with FROM or TO (e.g. 'FROM 26-PIT-9087')
+    for txt in all_texts:
+        if tag in txt and bool(re.search(r'\b(?:FROM|TO|TIE-IN|CONTINUED)\b', txt)):
+            return InstrumentRole.EXTERNAL_REFERENCE, f"Contained in off-page reference phrase '{txt}'"
+
+    # B) Unit prefix differs from drawing primary unit (e.g. 27-PIT-0001B on Unit 26 sheet)
+    m_unit = re.match(r'^(\d{2,3})-', tag)
+    if m_unit:
+        tag_unit = m_unit.group(1)
+        if current_unit and tag_unit != current_unit:
+            return InstrumentRole.EXTERNAL_REFERENCE, f"Unit prefix '{tag_unit}' differs from drawing sheet unit '{current_unit}' (off-sheet tie-in)"
+
+    # C) Specific header/off-page reference context
+    if ctx.get("is_header_ref") or "HEADER" in raw_ctx_text:
+        return InstrumentRole.EXTERNAL_REFERENCE, "Header / off-page connector reference"
+
+    # 6. Valid On-Page Instrument Loop
+    m_inst = re.match(r'^(?:(\d{2,3})-)?([A-Z]{2,4})-(\d{3,5}[A-Z]?)$', tag)
+    if m_inst:
+        code = m_inst.group(2)
+        if code in INSTRUMENT_FUNCTION_CODES or code.startswith(('P', 'T', 'F', 'L', 'A', 'V', 'Z')):
+            return InstrumentRole.ON_PAGE_INSTRUMENT, "Valid on-page ISA-5.1 instrument loop"
+
+    return InstrumentRole.ON_PAGE_INSTRUMENT, "On-page instrument candidate"

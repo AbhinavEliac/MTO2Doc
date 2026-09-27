@@ -565,6 +565,13 @@ def classify_paddle_results(
     found: Dict[str, Dict] = {}  # tag → item (deduplicated by EXACT tag string)
     dt = (drawing_type or 'PID').upper()
 
+    # Pre-extract all reference phrases across the entire drawing (FROM, TO, TIE-IN, CONTINUED ON)
+    ref_phrases = {
+        str(it.get('text', '')).upper()
+        for it in items
+        if re.search(r'\b(?:FROM|TO|TIE-IN|CONTINUED\s+ON|SEE\s+DWG|REF\s+DWG)\b', str(it.get('text', '')), re.IGNORECASE)
+    }
+
     for item_idx, item in enumerate(items):
         text = item.get('text', '').strip()
         conf = float(item.get('confidence', 0))
@@ -640,7 +647,7 @@ def classify_paddle_results(
             for tag in (tag1, tag2):
                 if tag not in found:
                     it_copy = dict(item)
-                    if is_ref_context:
+                    if is_ref_context or any(tag in rp for rp in ref_phrases):
                         it_copy["is_reference"] = True
                     found[tag] = _make_item(tag, 'INSTRUMENT_TAG', conf, it_copy)
             item_added = True
@@ -652,7 +659,7 @@ def classify_paddle_results(
             st_tag = f"{unit}-ST-{seq}"
             if st_tag not in found:
                 it_copy = dict(item)
-                if is_ref_context:
+                if is_ref_context or any(st_tag in rp for rp in ref_phrases):
                     it_copy["is_reference"] = True
                 found[st_tag] = _make_item(st_tag, 'EQUIPMENT_TAG', conf, it_copy)
                 item_added = True
@@ -672,7 +679,8 @@ def classify_paddle_results(
 
             _VALVE_FUNCTION_CODES = {
                 'CB', 'GB', 'BL', 'GT', 'BT', 'GL', 'NV', 'BV', 'PL', 'BF', 'CK', 'ND',
-                'HV', 'XV', 'MOV', 'SDV', 'BDV', 'CV', 'PCV', 'TCV', 'FCV', 'LCV', 'ZV', 'EV'
+                'HV', 'XV', 'MOV', 'SDV', 'BDV', 'CV', 'PCV', 'TCV', 'FCV', 'LCV', 'ZV', 'EV',
+                'FV', 'PV', 'TV', 'LV'
             }
             if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 3:
                 cat = 'VALVE_TAG'
@@ -695,7 +703,7 @@ def classify_paddle_results(
 
             if full_tag not in found:
                 it_copy = dict(item)
-                if is_ref_context:
+                if is_ref_context or any(full_tag in rp for rp in ref_phrases):
                     it_copy["is_reference"] = True
                 found[full_tag] = _make_item(full_tag, cat, conf, it_copy)
                 item_added = True

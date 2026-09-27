@@ -207,3 +207,111 @@ def test_confidence_calibration_no_universal_one():
     )
     assert 0.85 <= conf_high <= 0.98, f"Expected calibrated high confidence, got {conf_high}"
     assert conf_high != 1.0, "Confidence should be evidence-calibrated, never hardcoded 1.0"
+
+
+def test_instrument_role_classification_phase2():
+    """Verify explicit distinction between ON_PAGE_INSTRUMENT, CONTROL_VALVE, LINE_ID, EQUIPMENT_ATTR, and EXTERNAL_REF."""
+    from src.utils.entity_validator import classify_instrument_role, InstrumentRole
+
+    # 1. 26-AI-63-9000 & 26-AI-63-9001 are line identifiers (service AI = Instrument Air)
+    role_ai0, _ = classify_instrument_role("26-AI-63-9000", known_lines=['1"-AI-63-9000-AS20-00'])
+    assert role_ai0 == InstrumentRole.LINE_IDENTIFIER, f"Expected LINE_IDENTIFIER, got {role_ai0}"
+    role_ai1, _ = classify_instrument_role("26-AI-63-9001", known_lines=['1"-AI-63-9001-AS20-00'])
+    assert role_ai1 == InstrumentRole.LINE_IDENTIFIER, f"Expected LINE_IDENTIFIER, got {role_ai1}"
+
+    # 2. 26-FV-9038 is a Flow Control Valve
+    role_fv, _ = classify_instrument_role("26-FV-9038")
+    assert role_fv == InstrumentRole.CONTROL_VALVE, f"Expected CONTROL_VALVE, got {role_fv}"
+
+    # 3. 26-TT-26-9711 is vessel trim / equipment attribute
+    role_tt, _ = classify_instrument_role("26-TT-26-9711")
+    assert role_tt == InstrumentRole.EQUIPMENT_ATTRIBUTE, f"Expected EQUIPMENT_ATTRIBUTE, got {role_tt}"
+
+    # 4. 27-PIT-0001B is an external reference (Unit 27 on Unit 26 sheet)
+    role_ext, _ = classify_instrument_role("27-PIT-0001B", current_unit="26")
+    assert role_ext == InstrumentRole.EXTERNAL_REFERENCE, f"Expected EXTERNAL_REFERENCE, got {role_ext}"
+
+    # 5. 26-PIT-9087 is an external reference (preceded by FROM 26-PIT-9087)
+    role_ref, _ = classify_instrument_role("26-PIT-9087", all_ocr_texts=["FROM 26-PIT-9087 IN 3RD STAGE HP GAS"])
+    assert role_ref == InstrumentRole.EXTERNAL_REFERENCE, f"Expected EXTERNAL_REFERENCE, got {role_ref}"
+
+    # 6. Valid on-page instruments remain ON_PAGE_INSTRUMENT
+    for valid_tag in ("26-PIT-9016", "26-PIT-9026", "26-PDIT-9015", "26-TIT-9018", "26-TIT-9024"):
+        role_v, _ = classify_instrument_role(valid_tag, current_unit="26")
+        assert role_v == InstrumentRole.ON_PAGE_INSTRUMENT, f"Expected ON_PAGE_INSTRUMENT for {valid_tag}, got {role_v}"
+
+
+def test_line_canonicalization_and_deduplication():
+    """Verify VA-26-9120-AS20S-00 and 2\"-VA-26-9120-AS20S-00 merge into a single canonical entity."""
+    from src.utils.entity_validator import canonicalize_line_tag
+    from src.agents.compiler import CompilerAgent
+
+    canon1, core1, size1 = canonicalize_line_tag('2"-VA-26-9120-AS20S-00')
+    assert canon1 == '2"-VA-26-9120-AS20S-00'
+    assert core1 == 'VA-26-9120-AS20S-00'
+    assert size1 == '2"'
+
+    canon2, core2, size2 = canonicalize_line_tag('VA-26-9120-AS20S-00')
+    assert core2 == 'VA-26-9120-AS20S-00'
+    assert size2 == ""
+
+    # Test CompilerAgent deduplication
+    ca = CompilerAgent()
+    texts = [
+        {"classification": "LINE_TAG", "tag": "VA-26-9120-AS20S-00"},
+        {"classification": "LINE_TAG", "tag": '2"-VA-26-9120-AS20S-00'},
+    ]
+    compiled_lines = ca._compile_lines(texts, {}, [])
+    assert len(compiled_lines) == 1, f"Expected 1 merged line, got {len(compiled_lines)}"
+    assert compiled_lines[0].tag == '2"-VA-26-9120-AS20S-00'
+    assert compiled_lines[0].size == '2"'
+
+
+def test_relationship_validator_rules():
+    """Verify RelationshipValidator rejects self-references, area mismatches, and non-relief flare edges."""
+    from src.utils.relationship_validator import RelationshipValidator, RelationshipStatus
+
+    graph_entities = {
+        "valves": [type("V", (), {"tag": "40GB9005"})(), type("V", (), {"tag": "26CB9131"})()],
+        "lines": [
+            type("L", (), {"tag": '3/4"-DC-57-9005-FC11S-00'})(),
+            type("L", (), {"tag": '2"-VA-26-9110-AS20S-00'})(),
+            type("L", (), {"tag": '8"-PV-26-9007-FC11S-08'})(),
+        ],
+        "instruments": [type("I", (), {"tag": "26-TIT-9025"})()],
+        "safety_relief_valves": [type("P", (), {"tag": "PSV-9027A"})()],
+    }
+    alias_map = {
+        '2"-VA-26-9110': '2"-VA-26-9110-AS20S-00',
+        'VA-26-9110': '2"-VA-26-9110-AS20S-00',
+    }
+
+    # 1. Self-reference duplicate rejection (2"-VA-26-9110 -> VA-26-9110)
+    st_self, _, _, _ = RelationshipValidator.validate_relationship(
+        source='2"-VA-26-9110', target='VA-26-9110', rel_type="connects_to",
+        graph_entities=graph_entities, tag_alias_map=alias_map
+    )
+    assert st_self == RelationshipStatus.REJECTED
+
+    # 2. Area mismatch rejection (40GB9005 -> 3/4"-DC-57-9005-FC11S-00)
+    st_area, _, _, _ = RelationshipValidator.validate_relationship(
+        source='40GB9005', target='3/4"-DC-57-9005-FC11S-00', rel_type="installed_on",
+        graph_entities=graph_entities, tag_alias_map=alias_map
+    )
+    assert st_area == RelationshipStatus.REJECTED
+
+    # 3. Non-relief device to flare rejection (CK-911 -> LP FLARE)
+    st_flare, _, _, _ = RelationshipValidator.validate_relationship(
+        source='CK-911', target='LP FLARE', rel_type="relieves_to",
+        graph_entities=graph_entities, tag_alias_map=alias_map
+    )
+    assert st_flare == RelationshipStatus.REJECTED
+
+    # 4. PSV relief device accepted
+    st_psv, conf_psv, ev_psv, _ = RelationshipValidator.validate_relationship(
+        source='PSV-9027A', target='HP Flare Header', rel_type="relieves_to",
+        graph_entities=graph_entities, tag_alias_map=alias_map
+    )
+    assert st_psv == RelationshipStatus.ACCEPTED
+    assert conf_psv > 0.85
+    assert ev_psv["evidence_score"] > 0.85
