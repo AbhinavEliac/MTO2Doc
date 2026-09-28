@@ -13,6 +13,10 @@ streamlit>=1.30.0
 pymupdf>=1.23.0
 pdf2image>=1.17.0
 opencv-python-headless>=4.8.0
+# OCR & Deep Learning Backends
+torch>=2.0.0
+torchvision>=0.15.0
+easyocr>=1.7.0
 paddlepaddle>=2.6.0
 paddleocr>=2.7.0
 # Training dependencies

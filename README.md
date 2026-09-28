@@ -2,6 +2,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python Version" />
+  <img src="https://img.shields.io/badge/EasyOCR-4--Way%20Perception-792EE5?style=for-the-badge&logo=pytorch&logoColor=white" alt="EasyOCR" />
+  <img src="https://img.shields.io/badge/PyTorch-CUDA%20Accelerated-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white" alt="PyTorch" />
   <img src="https://img.shields.io/badge/LangGraph-Parallel%20Perception-orange?style=for-the-badge&logo=langchain&logoColor=white" alt="LangGraph" />
   <img src="https://img.shields.io/badge/Streamlit-Interactive%20Dashboard-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white" alt="Streamlit" />
   <img src="https://img.shields.io/badge/ISA--5.1-Native%20Extraction-008080?style=for-the-badge" alt="ISA 5.1" />
@@ -73,7 +75,7 @@ flowchart TD
     C --> D[🎯 SupervisorAgent\nDrawing Classifier: P&ID / SLD / HVAC]
     
     subgraph Parallel Perception Sub-Graph 👁️
-        D --> E1[🔤 TextRecognitionAgent\nLayer 1 PaddleOCR + Layer 2 Vision-LLM]
+        D --> E1[🔤 TextRecognitionAgent\nLayer 1 EasyOCR 4-Way Perception + Layer 2 Vision-LLM]
         D --> E2[🎯 SymbolRecognitionAgent\nDeep Object Detection for CAD Symbols]
         D --> E3[⚡ PipelineRecognitionAgent\nComputer-Vision Line Tracer & Topology]
     end
@@ -159,7 +161,35 @@ pip install -r requirements.txt
 
 ---
 
-### 3. Configure API Credentials
+### 3. OCR Engine Setup & Model Downloads (EasyOCR)
+
+SID-AI incorporates **EasyOCR** (PyTorch backend) as its primary, ultra-robust local OCR engine across Windows, Linux, and macOS. It features **4-direction cardinal perception ($0^\circ, 90^\circ, 180^\circ, 270^\circ$)** to reliably detect horizontal and vertical piping lines, tilted text, and densely packed valve tags.
+
+#### A. PyTorch & EasyOCR Installation
+The dependencies are defined in `requirements.txt`. For standard installation:
+```bash
+pip install -r requirements.txt
+```
+
+If you have an NVIDIA GPU and want **CUDA hardware acceleration** (recommended for large blueprints, 5–10× speedup):
+```bash
+# Windows / Linux with CUDA 12.1+
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install easyocr
+```
+
+#### B. Pre-Downloading OCR Models (For Offline / Air-Gapped Blueprints)
+EasyOCR automatically downloads its CRAFT text detection (`craft_mlt_25k.pth`) and English recognition (`english_g2.pth`) models to `~/.EasyOCR/model/` on its first run. 
+
+To pre-cache the models in advance so the system operates completely offline without internet access:
+```bash
+python -c "import easyocr; reader = easyocr.Reader(['en'], gpu=True)"
+```
+> **Note**: If CUDA is unavailable, the reader automatically initializes in multi-threaded CPU mode without any manual configuration.
+
+---
+
+### 4. Configure API Credentials
 
 Create a `.env` file in the root directory (or copy from `.env.example`):
 
@@ -179,11 +209,11 @@ GEMINI_MODEL=gemini-2.0-flash
 QWEN_MODEL=qwen/qwen-2.5-72b-instruct
 ```
 
-> **Note**: If API keys are omitted, SID-AI gracefully falls back to local PaddleOCR + PyMuPDF + OpenCV heuristic extraction.
+> **Note**: If API keys are omitted, SID-AI gracefully falls back to local EasyOCR + PaddleOCR + PyMuPDF + OpenCV heuristic extraction.
 
 ---
 
-### 4. Launch Interactive Web Dashboard
+### 5. Launch Interactive Web Dashboard
 
 Launch the Streamlit interface:
 
@@ -195,13 +225,14 @@ Open your browser at **`http://localhost:8501`**.
 
 **Dashboard Features**:
 - 📤 **Drag-and-Drop Uploader**: Upload vector or raster PDF / PNG / TIFF blueprints.
+- 🔤 **OCR Engine Selector**: Choose between **EasyOCR (Local / Offline — Images & PDFs)**, PaddleOCR, or PyMuPDF.
 - 🔍 **Interactive Canvas & Bounding Boxes**: Zoom in on tagged valves, instruments, and equipment.
 - 📊 **Live Editable Data Tables**: Review and filter Line Lists, Valve Schedules, Instrument Indexes, and Equipment Lists.
 - 💾 **One-Click Export**: Download deliverables in Excel, AVEVA XML, Siemens COMOS JSON, and SmartPlant CSV formats.
 
 ---
 
-### 5. Running Automated Verification Tests
+### 6. Running Automated Verification Tests
 
 Verify system accuracy across all 43 unit and integration tests:
 
@@ -276,5 +307,5 @@ pid_project/
 
 <p align="center">
   <i>Developed with ❤️ by <b>Abhinav Gupta</b> (abhinavgupta15.ag@gmail.com)</i><br>
-  <i>Built with Python, LangGraph, Streamlit, OpenCV, PaddleOCR, Qwen 3.7 VL, and Google Gemini.</i>
+  <i>Built with Python, LangGraph, Streamlit, OpenCV, EasyOCR, PaddleOCR, Qwen 3.7 VL, and Google Gemini.</i>
 </p>
