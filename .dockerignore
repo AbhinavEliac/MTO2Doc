@@ -1,0 +1,72 @@
+# ==============================================================================
+# .dockerignore for SID-AI P&ID / Engineering Diagram Extraction Platform
+# ==============================================================================
+
+# Python bytecode and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Virtual Environments
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Git and IDE metadata
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+.claude/
+.gemini/
+
+# Large datasets, raw datasets & weights (mount via volume if needed)
+pid_stuff/
+training/
+runs/
+yolov8m.pt
+yolo26n.pt
+
+# Extraction databases & runtime logs
+extraction_history.db
+*.log
+install_log.txt
+
+# Temporary diagnostic dumps & media
+coverage_overlay.png
+uploads/*_preprocessed.png
+uploads/crops/
+scratch/
+tmp/
+*.tmp
+*.mp4
+*.webm

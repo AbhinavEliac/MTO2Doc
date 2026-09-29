@@ -1,0 +1,61 @@
+# ==============================================================================
+# Docker Compose for SID-AI Engineering Diagram Extraction Platform
+# ==============================================================================
+
+services:
+  sid-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILDER_IMAGE: python:3.13-bookworm
+        RUNNER_IMAGE: python:3.13-slim-bookworm
+    container_name: sid-ai-extraction
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    
+    # Load API keys and configurations from .env
+    env_file:
+      - .env
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      # Increase upload limit for high-resolution engineering drawings (in MB)
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=500
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+    # Allocate 2GB shared memory for PyTorch, EasyOCR, and OpenCV workers
+    # (prevents container crashes during multi-threaded image processing)
+    shm_size: '2gb'
+
+    volumes:
+      # Diagram inputs and generated engineering deliverables (Excel, CSV, Graph JSON)
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      # Persistent cache for downloaded neural network weights (EasyOCR & PyTorch)
+      - easyocr-models:/app/models/easyocr
+      - torch-models:/app/models/torch
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # ── Optional: Uncomment below for NVIDIA GPU acceleration ───────────────────
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  easyocr-models:
+    name: sid_ai_easyocr_models
+  torch-models:
+    name: sid_ai_torch_models
