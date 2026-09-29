@@ -215,13 +215,101 @@ QWEN_MODEL=qwen/qwen-2.5-72b-instruct
 
 ### 5. Launch Interactive Web Dashboard
 
-Launch the Streamlit interface:
+SID-AI can be executed in two different ways depending on your environment:
+
+#### 🚀 Option A: Running Locally with Streamlit (Python Virtual Environment)
+
+Ensure your virtual environment (`pid_env`) is activated:
 
 ```bash
+# Windows (PowerShell):
+.\pid_env\Scripts\activate
+
+# macOS / Linux:
+source pid_env/bin/activate
+
+# Launch the Streamlit dashboard
 streamlit run app.py
 ```
 
+Optional Streamlit runtime flags:
+```bash
+# Run on a custom port and bind to all network interfaces
+streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+```
+
 Open your browser at **`http://localhost:8501`**.
+
+---
+
+#### 🐳 Option B: Running with Docker & Docker Compose (Recommended for Production)
+
+SID-AI features an enterprise-grade **Multi-Stage Dockerfile** using:
+- **Builder Stage**: `python:3.13-bookworm` (compiles and wheels heavy dependencies: PyTorch, EasyOCR, PaddlePaddle, OpenCV)
+- **Runner Stage**: `python:3.13-slim-bookworm` (minimal, secure runtime with only shared libraries like `libgl1`, `libgomp1`, and `poppler-utils`)
+
+##### 1. Start with Docker Compose (Fastest & Recommended)
+
+Ensure Docker Desktop / Docker Engine is running, then run:
+
+```bash
+# 1. Build and start the container in background (detached) mode
+docker compose up --build -d
+
+# 2. View real-time logs
+docker compose logs -f
+
+# 3. Stop and tear down the container
+docker compose down
+```
+
+The container automatically:
+- Mounts `./uploads` and `./outputs` to persist engineering drawings and exported deliverables.
+- Caches neural network model weights inside named Docker volumes (`easyocr-models`, `torch-models`).
+- Allocates `shm_size: 2gb` for multi-threaded OpenCV / PyTorch workers to prevent shared memory bus crashes.
+- Loads your environment configurations and API keys from `.env`.
+
+##### 2. Running Directly with Docker CLI
+
+If you prefer building and running directly with Docker CLI without Compose:
+
+```bash
+# Build the multi-stage image
+docker build -t sid-ai:latest .
+
+# Run container with volume bindings and 2GB shared memory
+docker run -d \
+  --name sid-ai-app \
+  -p 8501:8501 \
+  --shm-size=2g \
+  --env-file .env \
+  -v "$(pwd)/uploads:/app/uploads" \
+  -v "$(pwd)/outputs:/app/outputs" \
+  sid-ai:latest
+```
+
+##### 3. GPU Hardware Acceleration in Docker (Optional)
+
+If your host machine has an NVIDIA GPU with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed:
+
+Uncomment the `deploy` block in `docker-compose.yml`:
+```yaml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+```
+Or run directly:
+```bash
+docker run -d --gpus all --name sid-ai-gpu -p 8501:8501 --shm-size=2g --env-file .env sid-ai:latest
+```
+
+Open your browser at **`http://localhost:8501`**.
+
+---
 
 **Dashboard Features**:
 - 📤 **Drag-and-Drop Uploader**: Upload vector or raster PDF / PNG / TIFF blueprints.
@@ -254,6 +342,9 @@ FINAL RESULT: 43/43 Tests Passed (100% Precision Verified Across All Categories)
 ```
 pid_project/
 ├── app.py                            # Streamlit Interactive Dashboard
+├── Dockerfile                        # Multi-Stage Python 3.13 Build & Slim Runtime
+├── docker-compose.yml                # Docker Compose Orchestration & Volumes
+├── .dockerignore                     # Docker Build Context Exclusions
 ├── requirements.txt                  # Python Dependencies
 ├── .env.example                      # Template Environment Credentials
 ├── .gitignore                        # Git Exclusion Configuration
