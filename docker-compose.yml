@@ -34,9 +34,12 @@ services:
       # Diagram inputs and generated engineering deliverables (Excel, CSV, Graph JSON)
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
+      # Trained YOLO weights and models
+      - ./training/outputs:/app/training/outputs:ro
       # Persistent cache for downloaded neural network weights (EasyOCR & PyTorch)
       - easyocr-models:/app/models/easyocr
       - torch-models:/app/models/torch
+
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
@@ -45,14 +48,19 @@ services:
       retries: 3
       start_period: 40s
 
-    # ── Optional: Uncomment below for NVIDIA GPU acceleration ───────────────────
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    # Hard cap on CPU/System RAM at 80% (6GB of available 7.57GB WSL2 RAM)
+    mem_limit: 6g
+
+    # ── NVIDIA GPU acceleration with zero VRAM caps & 80% RAM limit ─────────────
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 volumes:
   easyocr-models:

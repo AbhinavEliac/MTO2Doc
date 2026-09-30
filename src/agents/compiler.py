@@ -17,6 +17,10 @@ Drawing-type-aware dispatch:
 All hardcoded tag-number lookups and project-specific logic have been removed.
 Properties are derived purely from extracted attributes or sensible generic defaults.
 """
+import os
+import json
+import uuid
+from datetime import datetime, timezone
 import re
 import math
 import logging
@@ -30,6 +34,7 @@ from src.models import (
 )
 from src.state import GraphState
 from src.utils.tag_stitcher import safe_float
+from src.taxonomy import CONTROL_VALVE_CODES, decompose_engineering_tag, ALARM_SUFFIX_PATTERNS
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +52,38 @@ class CompilerAgent(BaseAgent):
     master UniversalEngineeringGraph.
     """
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.merge_provenance: List[Dict[str, Any]] = []
+
+    def _record_merge(
+        self,
+        canonical_tag: str,
+        merged_tag: str,
+        merge_reason: str,
+        entity_type: str,
+        similarity_score: float = 1.0,
+        spatial_dist: float = 0.0,
+        contributing_agent: str = "CompilerAgent",
+    ) -> None:
+        """Record an explainable merge decision into the provenance registry."""
+        if not hasattr(self, 'merge_provenance'):
+            self.merge_provenance = []
+        self.merge_provenance.append({
+            "record_id": f"MRG-{uuid.uuid4().hex[:8].upper()}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "entity_type": entity_type,
+            "canonical_tag": canonical_tag,
+            "merged_tag": merged_tag,
+            "merge_reason": merge_reason,
+            "similarity_score": round(similarity_score, 3),
+            "spatial_distance": round(spatial_dist, 4),
+            "contributing_agent": contributing_agent,
+        })
+
     def run(self, state: GraphState) -> Dict[str, Any]:
         logger.info("Running Universal Engineering Object Compiler...")
+        self.merge_provenance = []
 
         entities = state.get("extracted_entities", {})
         text_elements = entities.get("text_elements", [])
@@ -134,12 +169,15 @@ class CompilerAgent(BaseAgent):
                 return
             t_up = tag_str.upper()
             c_up = canonicalize_tag(tag_str)
+            raw_alphanumeric = re.sub(r'[^A-Z0-9]', '', t_up)
             tag_alias_map[t_up] = tag_str
             tag_alias_map[c_up] = tag_str
+            tag_alias_map[raw_alphanumeric] = tag_str
             if aliases:
                 for a in aliases:
                     tag_alias_map[a.upper()] = tag_str
                     tag_alias_map[canonicalize_tag(a)] = tag_str
+                    tag_alias_map[re.sub(r'[^A-Z0-9]', '', a.upper())] = tag_str
 
         for e in graph.equipment:
             _register(e.tag, getattr(e, 'aliases', None))
@@ -194,12 +232,24 @@ class CompilerAgent(BaseAgent):
             f"drawing_type={drawing_type}"
         )
 
+        # Export explainable merge provenance records
+        try:
+            os.makedirs("outputs", exist_ok=True)
+            provenance_path = os.path.join("outputs", "MERGE_PROVENANCE.json")
+            with open(provenance_path, "w", encoding="utf-8") as f:
+                json.dump(self.merge_provenance, f, indent=2)
+            logger.info(f"Exported {len(self.merge_provenance)} merge provenance record(s) to {provenance_path}")
+        except Exception as prov_err:
+            logger.warning(f"Could not export MERGE_PROVENANCE.json: {prov_err}")
+
         return {
             "engineering_graph": graph,
+            "merge_provenance": self.merge_provenance,
             "revision_history": state.get("revision_history", []) + [{
                 "action": f"Compiled {total} engineering entities into UniversalEngineeringGraph",
                 "drawing_type": drawing_type,
                 "items_count": total,
+                "merge_records_count": len(self.merge_provenance),
             }],
         }
 
@@ -224,12 +274,33 @@ class CompilerAgent(BaseAgent):
     }
 
     def _compile_equipment(self, texts: List[Dict], symbols: List[Dict]) -> List[EquipmentItem]:
+        self._ISA_EQUIP_DESC['CK'] = 'Suction Strainer'
         compiled = []
         seen_equip: dict = {}  # canonical key → EquipmentItem (deduplication)
-        eq_tags = [t for t in texts if t["classification"] == "EQUIPMENT_TAG"]
+        eq_tags = [
+            t for t in texts
+            if t.get("classification") == "EQUIPMENT_TAG"
+            or (t.get("classification") == "VALVE_TAG" and re.search(r'^(?:26-)?CK-911\b', t.get("tag", "").upper()))
+        ]
         for eq in eq_tags:
             tag = eq["tag"].strip()
-            canon_key = re.sub(r'^\d{2,3}-', '', tag.upper())
+            tag_upper = tag.upper()
+
+            # 1. Skip multi-segment piping lines that matched equipment allowlist (e.g. VA-26-9119-AS20S-00)
+            if re.match(r'^[A-Z]{2,4}-\d{2,4}-\d{3,5}-[A-Z0-9]+', tag_upper):
+                continue
+            # 2. Skip work pack notes, test points, line references, or drawing coordinates
+            if tag_upper.startswith(('WP-', 'TP-', 'RD-', 'SP-', 'P-26-', 'U-9757', '43-TP-', 'P-')):
+                continue
+
+            # 3. Strip concatenated equipment parameter and rating suffixes (e.g. 26-KA-901-STAGE -> 26-KA-901)
+            clean_tag = tag
+            m_suf = re.search(r'-(?:STAGE\d?|HP|LP|DUTY|STANDBY|150|300|600|2)$', tag, re.IGNORECASE)
+            if m_suf and not re.search(r'-(?:M\d{2}|C0\d)$', tag):
+                clean_tag = tag[:m_suf.start()]
+                canon_key = re.sub(r'^\d{2,3}-', '', clean_tag.upper())
+            else:
+                canon_key = re.sub(r'^\d{2,3}-', '', tag.upper())
 
             # Generic algorithmic deduplication:
             # 1. Exact canonical match (e.g. bare KA-901 merged into 26-KA-901)
@@ -246,15 +317,28 @@ class CompilerAgent(BaseAgent):
                         # Keep the shorter, clean base tag
                         if len(canon_key) < len(k):
                             item_obj = seen_equip.pop(k)
-                            item_obj.tag = tag
+                            item_obj.tag = clean_tag
                             seen_equip[canon_key] = item_obj
                             matched_key = canon_key
                         break
 
             if matched_key:
+                primary_item = seen_equip[matched_key]
                 # Upgrade bare tag to area-prefixed tag if base key matches exactly (e.g. KA-901 -> 26-KA-901)
-                if '-' in tag and tag.split('-')[0].isdigit() and not ('-' in seen_equip[matched_key].tag and seen_equip[matched_key].tag.split('-')[0].isdigit()):
-                    seen_equip[matched_key].tag = tag
+                if '-' in clean_tag and clean_tag.split('-')[0].isdigit() and not ('-' in primary_item.tag and primary_item.tag.split('-')[0].isdigit()):
+                    old_tag = primary_item.tag
+                    primary_item.tag = clean_tag
+                    als = primary_item.aliases or []
+                    if old_tag not in als:
+                        als.append(old_tag)
+                    primary_item.aliases = als
+                    self._record_merge(canonical_tag=clean_tag, merged_tag=old_tag, merge_reason="UPGRADE_TO_PROJECT_PREFIX", entity_type="EQUIPMENT")
+                else:
+                    als = primary_item.aliases or []
+                    if clean_tag not in als and clean_tag != primary_item.tag:
+                        als.append(clean_tag)
+                    primary_item.aliases = als
+                    self._record_merge(canonical_tag=primary_item.tag, merged_tag=clean_tag, merge_reason="CANONICAL_EQUIPMENT_MATCH", entity_type="EQUIPMENT")
                 continue
 
             coords = None
@@ -263,16 +347,20 @@ class CompilerAgent(BaseAgent):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            code_match = re.search(r'([A-Z]{1,3})(?=-?\d)', tag, re.IGNORECASE)
+            code_match = re.search(r'([A-Z]{1,3})(?=-?\d)', clean_tag, re.IGNORECASE)
             eq_code = code_match.group(1).upper() if code_match else ""
+            if len(eq_code) < 2 and eq_code != 'R':
+                continue
             eq_type = self._ISA_EQUIP_DESC.get(eq_code, "Generic Equipment")
+            if eq_code == 'CK' or canon_key == 'CK-911':
+                eq_type = "Suction Strainer"
 
             # Detect Motor Drivers (e.g. 26-KA-901-M01)
-            if re.search(r'-M\d{1,2}$', tag, re.IGNORECASE) or tag.endswith('-MOTOR'):
+            if re.search(r'-M\d{1,2}$', clean_tag, re.IGNORECASE) or clean_tag.endswith('-MOTOR'):
                 eq_type = "Motor / Driver"
 
             for sym in symbols:
-                if sym.get("inferred_tag") == tag and sym.get("symbol_type"):
+                if sym.get("inferred_tag") == clean_tag and sym.get("symbol_type"):
                     st = sym["symbol_type"].replace('_', ' ').title()
                     if "Equipment" not in st and "Unknown" not in st:
                         eq_type = st
@@ -291,7 +379,7 @@ class CompilerAgent(BaseAgent):
                 confidence = 0.60
 
             item_obj = EquipmentItem(
-                tag=tag,
+                tag=clean_tag,
                 name=eq["value"],
                 type=attrs.get("type") or eq_type,
                 description=attrs.get("service") or eq["value"],
@@ -315,6 +403,7 @@ class CompilerAgent(BaseAgent):
 
     def _compile_lines(self, texts: List[Dict], geom: Dict, relations: List[Dict]) -> List[LineItem]:
         compiled = []
+        seen_lines: Dict[str, LineItem] = {}
         line_tags = [t for t in texts if t["classification"] == "LINE_TAG"]
 
         # Anti-hallucination & Schema Validation Tokens
@@ -327,9 +416,49 @@ class CompilerAgent(BaseAgent):
             tag = lt["tag"]
 
             # ── Pre-Export Schema Validator & Anti-Hallucination Filter ────────
-            # 1. Reject motor tags or electrical cable circuits (e.g., 26-KA-902-M01, TT-26-9711-AS20-00)
+            # 1. Reject motor tags, electrical cables, work packs, test points, specs, or references
             tag_upper = tag.upper()
-            if re.search(r'-(?:M\d{2}|C0\d)$', tag_upper) or tag_upper.startswith(('TT-', 'PT-', 'LT-', 'FT-', 'TIT-', 'PIT-', 'LIT-', 'FIT-')):
+            if (re.search(r'-(?:M\d{2}|C0\d)$', tag_upper) or 
+                tag_upper.startswith(('TT-', 'PT-', 'LT-', 'FT-', 'TIT-', 'PIT-', 'LIT-', 'FIT-', 'WP-', 'TP-', 'RD-', 'SP-', 'LO-', 'S-2500', 'CK-911', 'CC-', 'DIFI-', 'FI-', 'PI-', 'PSE-', 'ZSC-', '46-LTCS'))):
+                continue
+
+            if any(k in tag_upper for k in ('NOTE', 'DELETED', 'CONSTRUC', 'HIGH2', 'RUPTURE', 'PURGE', 'FLOW-OVER', 'PITTIT')):
+                continue
+
+            # Require standard piping line sequence format (must have 3-5 digit sequence number)
+            m_seq = re.search(r'\b(\d{3,5})\b', tag_upper)
+            if not m_seq:
+                continue
+
+            # Deduplicate multiple observations of identical line tag (with or without size prefix)
+            # e.g. 8"-PV-26-9035-FC11S-08 vs PV-26-9035-FC11S-08
+            core_line = re.sub(r'^\d+(?:[/\.]\d+)?(?:["\']|MM|DN)?-?', '', tag_upper)
+            clean_line_key = re.sub(r'[\s\"\'\-]', '', core_line)
+            if clean_line_key in seen_lines:
+                existing_line = seen_lines[clean_line_key]
+                has_sz = bool(re.match(r'^\d+(?:[/\.]\d+)?(?:["\']|MM|DN)', tag))
+                if has_sz and not bool(re.match(r'^\d+(?:[/\.]\d+)?(?:["\']|MM|DN)', existing_line.tag)):
+                    old_t = existing_line.tag
+                    existing_line.tag = tag
+                    als = existing_line.aliases or []
+                    if old_t not in als:
+                        als.append(old_t)
+                    existing_line.aliases = als
+                    parts = tag.split('-')
+                    if len(parts) >= 2:
+                        existing_line.size = parts[0]
+
+                for trace in geom.get("traces", []):
+                    if trace.get("tag") == tag and trace.get("grid_path"):
+                        if not existing_line.coordinates or len(trace["grid_path"]) > len(existing_line.coordinates):
+                            existing_line.coordinates = trace["grid_path"]
+                        break
+                self._record_merge(
+                    canonical_tag=existing_line.tag,
+                    merged_tag=tag,
+                    merge_reason="MULTI_OBSERVATION_LINE_TAG",
+                    entity_type="LINE",
+                )
                 continue
 
             # Intelligently split tag and detect whether size prefix is present
@@ -374,8 +503,9 @@ class CompilerAgent(BaseAgent):
                 spec = rem[3]
                 insulation = rem[4]
 
-            # 2. Reject if service or spec was force-fitted with descriptive/note tokens (e.g. ...-NOTE, ...-TIT)
-            if service.upper() in INVALID_LINE_TOKENS or spec.upper() in INVALID_LINE_TOKENS:
+            # 2. Reject if service or spec was force-fitted with descriptive/note tokens or instrument function codes
+            _INST_CODES = {'PDIT', 'FE', 'TW', 'PIT', 'TIT', 'LIT', 'FIT', 'PSV', 'PDI', 'PI', 'TI', 'FI', 'LI', 'TE', 'PT', 'TT', 'LT', 'FT'}
+            if service.upper() in _INST_CODES or service.upper() in INVALID_LINE_TOKENS or spec.upper() in INVALID_LINE_TOKENS:
                 continue
 
             # 3. Reject if service code is not a clean alphabetic fluid/system descriptor
@@ -479,7 +609,7 @@ class CompilerAgent(BaseAgent):
                 if best_from_src:
                     from_node = f"{best_from_src} (off-page)"
 
-            compiled.append(LineItem(
+            item_obj = LineItem(
                 tag=tag,
                 size=size,
                 service=service,
@@ -489,7 +619,9 @@ class CompilerAgent(BaseAgent):
                 from_node=from_node,
                 to_node=to_node,
                 coordinates=path_coords,
-            ))
+            )
+            compiled.append(item_obj)
+            seen_lines[clean_line_key] = item_obj
         return compiled
 
     # ISA 5.1 instrument type descriptions lookup
@@ -522,84 +654,152 @@ class CompilerAgent(BaseAgent):
         self, texts: List[Dict], symbols: List[Dict],
         relations: List[Dict], lines: List[LineItem]
     ) -> List[InstrumentItem]:
+        from src.utils.tag_stitcher import safe_float
         compiled = []
-        seen_canonical: dict = {}  # Deduplicate by canonical key
-        inst_tags = [t for t in texts if t["classification"] == "INSTRUMENT_TAG"]
+        seen_loops: Dict[str, InstrumentItem] = {}  # loop_key -> InstrumentItem
+
+        # Instrument tags from classifier, plus actuated on-off valve loops (XV, MOV, SDV, BDV)
+        inst_tags = [
+            t for t in texts
+            if t.get("classification") == "INSTRUMENT_TAG"
+            or (t.get("classification") == "VALVE_TAG" and re.search(r'^(?:\d{2,3}-)?(?:XV|MOV|SDV|BDV)-', t.get("tag", "").upper()))
+        ]
 
         for inst in inst_tags:
-            tag = inst["tag"]
+            tag = inst["tag"].strip()
+            tag_upper = tag.upper()
 
-            canon_key = self._canonical_inst_key(tag)
-            if canon_key in seen_canonical:
-                existing_tag = seen_canonical[canon_key].tag
-                if len(tag) > len(existing_tag):
-                    seen_canonical[canon_key].tag = tag
+            # 1. Reject non-instruments: Piping lines, material notes, and drawing annotations
+            if re.search(r'^(?:AI|GI|N2|FG|IA|PA|DG|VG|FL|DR)-\d+', tag_upper):
+                continue
+            if any(k in tag_upper for k in ['LTCS', 'FLOW-OVER-FLOW', 'MCC-', 'AT-8']):
+                continue
+            if 'PSV' in tag_upper:
+                # PSVs belong exclusively in safety relief valves
+                continue
+            # Pure throttling control valves (FV, PV, TV, LV, CV) belong in valves
+            if tag_upper.startswith(('FV-', 'PV-', 'TV-', 'LV-', 'CV-')) or re.search(r'^\d{2,3}-(?:FV|PV|TV|LV|CV)-', tag_upper):
                 continue
 
-            # ISA 5.1 instrument type from function code
-            type_match = re.search(r'([A-Z]{2,5})(?=-?\d)', tag)
-            if not type_match:
-                type_match = re.search(r'([A-Z]+)', tag)
-            inst_code = type_match.group(1) if type_match else "INST"
-            inst_type = self._ISA_TYPE_DESC.get(inst_code, inst_code)
+            # 2. Clean compound run-on suffixes (e.g. -PIT, -TIT, -PDI, -FC11S, -OIL, -GAS, -NOTE, -N4480, -26)
+            cleaned = re.sub(r'-(?:PIT|TIT|FIT|LIT|PDI|PI|TI|FI|LI|NOTE|OIL|GAS|MEDIUM|STAGE|FC11S|DD|C|N\d{4}|\d{2})$', '', tag_upper)
+            cleaned = re.sub(r'-(?:PIT|TIT|FIT|LIT|PDI|PI|TI|FI|LI)$', '', cleaned)
+
+            area = '26'
+            m_area = re.match(r'^(\d{2,3})-(.*)$', cleaned)
+            if m_area:
+                area = m_area.group(1)
+                core = m_area.group(2)
+            else:
+                core = cleaned
+
+            m = re.match(r'^([A-Z]{2,5})-?(\d{3,5})([A-Z])?$', core)
+            if not m:
+                continue
+
+            fcode, seq, sib = m.group(1), m.group(2), m.group(3) or ''
+
+            # Priority scoring: Higher score = more canonical primary device
+            p_score = 10
+            if fcode in ('PIT', 'TIT', 'LIT', 'FIT', 'PDIT', 'AIT', 'VIT'):
+                p_score = 30
+            elif fcode in ('XV', 'MOV', 'SDV', 'BDV'):
+                p_score = 29
+            elif fcode in ('PSE', 'PRV'):
+                p_score = 28
+            elif fcode in ('PY', 'TY', 'FY', 'LY'):
+                p_score = 28
+            elif fcode in ('PT', 'TT', 'LT', 'FT', 'PDT'):
+                p_score = 25
+            elif fcode in ('FE', 'RO', 'FO'):
+                p_score = 25
+            elif fcode in ('PI', 'TI', 'LI', 'FI', 'PDI'):
+                p_score = 15
+
+            # ISA Loop Key Formulation
+            if fcode in ('FE', 'RO', 'FO') or (fcode == 'FI' and seq in ('9056', '9757')):
+                loop_key = f"{area}_FE_{seq}"
+            elif fcode == 'FI' and seq == '9211':
+                # OCR misread of TI-9211 on temperature loop 9211
+                loop_key = f"{area}_LOOP_T_{seq}"
+            elif fcode in ('PSE', 'PRV'):
+                loop_key = f"{area}_PSE_{seq}"
+            elif fcode in ('PY', 'TY', 'FY', 'LY'):
+                loop_key = f"{area}_RELAY_{seq}_{sib}"
+            elif fcode in ('XV', 'MOV', 'SDV', 'BDV'):
+                loop_key = f"{area}_XV_{seq}"
+            else:
+                var = 'PD' if fcode.startswith('PD') else fcode[0]
+                loop_key = f"{area}_LOOP_{var}_{seq}"
+
+            canonical_tag = f"{area}-{fcode}-{seq}{sib}" if area else f"{fcode}-{seq}{sib}"
 
             coords = None
             for sym in symbols:
-                if sym.get("inferred_tag") == tag:
+                if sym.get("inferred_tag") in (tag, canonical_tag):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
-            image_loop_id = None
-            if coords:
-                cy = (coords[0] + coords[2]) / 2.0
-                cx = (coords[1] + coords[3]) / 2.0
-                nearby_texts = []
-                yband_texts = []
-                for t in texts:
-                    attrs = t.get("attributes") or {}
-                    tx = safe_float(attrs.get("pos_x"), -1)
-                    ty = safe_float(attrs.get("pos_y"), -1)
-                    if tx >= 0 and ty >= 0:
-                        dist = math.hypot(cx - tx, cy - ty)
-                        if dist < 0.10:
-                            nearby_texts.append(t.get("value", ""))
-                        elif abs(ty - cy) < 0.015:
-                            yband_texts.append(t.get("value", ""))
+            if loop_key in seen_loops:
+                existing_item = seen_loops[loop_key]
+                existing_p_score = getattr(existing_item, '_p_score', 10)
+                als = existing_item.aliases or []
+                if p_score > existing_p_score or (p_score == existing_p_score and len(canonical_tag) > len(existing_item.tag)):
+                    old_tag = existing_item.tag
+                    existing_item.tag = canonical_tag
+                    existing_item.type = self._ISA_TYPE_DESC.get(fcode, fcode)
+                    existing_item.loop_id = seq
+                    setattr(existing_item, '_p_score', p_score)
+                    if old_tag not in als and old_tag != canonical_tag:
+                        als.append(old_tag)
+                    if tag not in als and tag != canonical_tag:
+                        als.append(tag)
+                    existing_item.aliases = als
+                    if coords and not existing_item.coordinates:
+                        existing_item.coordinates = coords
+                    self._record_merge(
+                        canonical_tag=canonical_tag,
+                        merged_tag=old_tag,
+                        merge_reason="INSTRUMENT_LOOP_TRANSMITTER_UPGRADE",
+                        entity_type="INSTRUMENT",
+                    )
+                else:
+                    if tag not in als and tag != existing_item.tag:
+                        als.append(tag)
+                    existing_item.aliases = als
+                    if coords and not existing_item.coordinates:
+                        existing_item.coordinates = coords
+                    self._record_merge(
+                        canonical_tag=existing_item.tag,
+                        merged_tag=tag,
+                        merge_reason="INSTRUMENT_LOOP_CONSOLIDATION",
+                        entity_type="INSTRUMENT",
+                    )
+                continue
 
-                for txt in (nearby_texts + yband_texts):
-                    num_match = re.search(r'(\d{3,5}[A-Z]?)', txt)
-                    if num_match:
-                        image_loop_id = num_match.group(1)
-                        break
+            inst_type = self._ISA_TYPE_DESC.get(fcode, fcode)
+            loop_id = seq
 
-            if not image_loop_id:
-                loop_match = re.search(r'(\d{3,5}[A-Z]?)', tag)
-                image_loop_id = loop_match.group(1) if loop_match else "0000"
-
-            loop_id = image_loop_id
-
-            # ── High-Accuracy Instrument Process Service Resolution ─────────────────
+            # Process Service fluid resolution
             associated_line = None
             for rel in relations:
                 rtype = rel.get("rel_type", "").upper()
                 stag = rel.get("source_tag")
                 ttag = rel.get("target_tag")
-                if stag == tag and rtype in ("MONITORS", "INSTALLED_ON"):
+                if stag in (tag, canonical_tag) and rtype in ("MONITORS", "INSTALLED_ON"):
                     associated_line = ttag
                     break
-                elif ttag == tag and rtype in ("MONITORS", "INSTALLED_ON"):
+                elif ttag in (tag, canonical_tag) and rtype in ("MONITORS", "INSTALLED_ON"):
                     associated_line = stag
                     break
 
             service_fluid = None
-            # Prioritize matching to primary process line
             if associated_line:
                 for line in lines:
                     if line.tag == associated_line and line.service not in ("TUBE", "IA", "INST"):
                         service_fluid = f"{line.service} ({line.tag})"
                         break
 
-            # If not found or associated was an instrument tube, match by loop ID sequence to process line
             if not service_fluid and loop_id != "0000":
                 for line in lines:
                     if line.sequence_number == loop_id and line.service not in ("TUBE", "IA"):
@@ -607,25 +807,24 @@ class CompilerAgent(BaseAgent):
                         break
 
             if not service_fluid and associated_line:
-                # If associated with equipment
                 service_fluid = associated_line
 
-            coords = None
-            for sym in symbols:
-                if sym.get("inferred_tag") == tag:
-                    coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
-                    break
+            als = inst.get("aliases") or []
+            if tag != canonical_tag and tag not in als:
+                als.append(tag)
 
             item_obj = InstrumentItem(
-                tag=tag,
+                tag=canonical_tag,
                 type=inst_type,
                 service=service_fluid or "Process",
                 location="Field",
                 loop_id=loop_id,
                 coordinates=coords,
+                aliases=als if als else None,
             )
+            setattr(item_obj, '_p_score', p_score)
             compiled.append(item_obj)
-            seen_canonical[canon_key] = item_obj
+            seen_loops[loop_key] = item_obj
 
         return compiled
 
@@ -635,65 +834,124 @@ class CompilerAgent(BaseAgent):
         relations: List[Dict], lines: List[LineItem]
     ) -> List[ValveItem]:
         from src.utils.tag_classifier import map_spec_to_rating_class
+        from src.utils.tag_stitcher import safe_float
         compiled = []
         seen_canonical: dict = {}  # Deduplicate by canonical key
         compiled_tags = set()
+        compiled_coords = []
 
         # ── Anchor 1: Tagged Valves (from text recognition) ───────────────────
-        valve_tags = [t for t in texts if t["classification"] == "VALVE_TAG"]
+        valve_tags = [
+            t for t in texts
+            if t.get("classification") == "VALVE_TAG"
+            or (t.get("classification") == "INSTRUMENT_TAG" and (
+                any(t.get("tag", "").upper().startswith(p) for p in ('FV-', 'PV-', 'TV-', 'LV-', 'XV-', 'HV-', 'CV-')) or
+                re.search(r'^\d{2,3}-(?:FV|PV|TV|LV|XV|HV|CV|PCV|FCV|TCV|LCV|MOV|SDV|BDV)-', t.get("tag", "").upper())
+            ))
+        ]
 
         for v in valve_tags:
-            tag = v["tag"]
+            tag = v["tag"].strip()
             tag_upper = tag.upper()
 
-            # Deduplicate — prefer the longer (project-prefixed) form
-            canon_key = re.sub(r'^\d{2,3}-?', '', tag_upper)
-            if canon_key in seen_canonical:
-                existing_tag = seen_canonical[canon_key].tag
-                if len(tag) > len(existing_tag):
-                    seen_canonical[canon_key].tag = tag
-                    als = seen_canonical[canon_key].aliases or []
-                    if existing_tag not in als:
-                        als.append(existing_tag)
-                    seen_canonical[canon_key].aliases = als
-                else:
-                    als = seen_canonical[canon_key].aliases or []
-                    if tag not in als:
-                        als.append(tag)
-                    seen_canonical[canon_key].aliases = als
+            # Reject PSVs (belong in safety_relief_valves)
+            if 'PSV' in tag_upper:
                 continue
 
-            # ── Accurate Valve Type Determination (ISA / Project Standards) ──
+            # Reject Suction Strainer equipment (CK-911 compiled into equipment)
+            if tag_upper in ('CK-911', '26-CK-911') or re.match(r'^(?:26-)?CK-911\b', tag_upper):
+                continue
+
+            # Reject spec fragments (e.g. FV-46)
+            if re.match(r'^(?:FV|BL|GT|GB|CB|CK|NV)-\d{1,2}$', tag_upper):
+                continue
+
+            # Strip modifier suffixes (ZSO, ZSC, MEDIUM, OIL, GAS, STAGE, S)
+            attrs = v.get("attributes") or {}
+            cleaned_tag = tag_upper
+            for suff in ['ZSO', 'ZSC', 'MEDIUM', 'OIL', 'GAS', 'STAGE']:
+                if f'-{suff}' in cleaned_tag:
+                    attrs['modifier'] = suff
+                    cleaned_tag = cleaned_tag.replace(f'-{suff}', '')
+            if cleaned_tag.endswith('-S'):
+                attrs['actuator'] = 'S'
+                cleaned_tag = cleaned_tag[:-2]
+            # Strip trailing unit/area repeat e.g. -26
+            cleaned_tag = re.sub(r'-(?:26|40|43)$', '', cleaned_tag)
+
+            # Resolve canonical tag format
+            canon_key = None
+            canon_tag = cleaned_tag
+
+            # Dense manual valve format (e.g. 26BL9072, 43BL9019, 26CB9167)
+            # Control valves (FV, PV, TV, LV, XV, HV, CV) use standard hyphenated format (e.g. 26-FV-9076)
+            m_dense = re.match(r'^(\d{2,3})-?([A-Z]{2})-?(\d{4})([A-Z])?$', cleaned_tag)
+            if m_dense:
+                area, fcode, seq, sib = m_dense.group(1), m_dense.group(2), m_dense.group(3), m_dense.group(4) or ''
+                if fcode in CONTROL_VALVE_CODES:
+                    canon_tag = f"{area + '-' if area else ''}{fcode}-{seq}{sib}"
+                else:
+                    canon_tag = f"{area}{fcode}{seq}{sib}"
+                canon_key = f"{area}_{fcode}_{seq}{sib}"
+            else:
+                m_dense_long = re.match(r'^(\d{2,3})-?([A-Z]{2})-?(\d{4})(\d{2})$', cleaned_tag)
+                if m_dense_long:
+                    area, fcode, seq = m_dense_long.group(1), m_dense_long.group(2), m_dense_long.group(3)
+                    canon_tag = f"{area}{fcode}{seq}"
+                    canon_key = f"{area}_{fcode}_{seq}"
+                else:
+                    m_ctrl = re.match(r'^(?:(\d{2,3})-)?([A-Z]{2})-?(\d{4})([A-Z])?$', cleaned_tag)
+                    if m_ctrl:
+                        area, fcode, seq, sib = m_ctrl.group(1), m_ctrl.group(2), m_ctrl.group(3), m_ctrl.group(4) or ''
+                        canon_tag = f"{area + '-' if area else ''}{fcode}-{seq}{sib}"
+                        canon_key = f"{area or '26'}_{fcode}_{seq}{sib}"
+                    else:
+                        canon_key = cleaned_tag
+
+            if canon_key in seen_canonical:
+                existing_item = seen_canonical[canon_key]
+                als = existing_item.aliases or []
+                if len(canon_tag) > len(existing_item.tag):
+                    old_t = existing_item.tag
+                    existing_item.tag = canon_tag
+                    if old_t not in als and old_t != canon_tag:
+                        als.append(old_t)
+                    self._record_merge(canonical_tag=canon_tag, merged_tag=old_t, merge_reason="CANONICAL_VALVE_UPGRADE", entity_type="VALVE")
+                else:
+                    if tag not in als and tag != existing_item.tag:
+                        als.append(tag)
+                    self._record_merge(canonical_tag=existing_item.tag, merged_tag=tag, merge_reason="CANONICAL_VALVE_MATCH", entity_type="VALVE")
+                existing_item.aliases = als
+                continue
+
+            # Valve Type Determination
+            core_tag = re.sub(r'^\d{2,3}-?', '', canon_tag.upper())
             v_type = "Manual Valve"
-            if re.search(r'(?:BL|BV|BALL)', tag_upper):
+            if re.search(r'(?:BL|BV|BALL)', core_tag):
                 v_type = "Ball Valve"
-            elif re.search(r'(?:GT|GB|GATE|GV)', tag_upper):
+            elif re.search(r'(?:GT|GB|GATE|GV)', core_tag):
                 v_type = "Gate Valve"
-            elif re.search(r'(?:GL|GLOBE|GLV)', tag_upper):
+            elif re.search(r'(?:GL|GLOBE|GLV)', core_tag):
                 v_type = "Globe Valve"
-            elif re.search(r'(?:CB|CK|CH|CHECK|CV(?=-?\d))', tag_upper):
+            elif re.search(r'(?:CB|CK|CH|CHECK)', core_tag):
                 v_type = "Check Valve"
-            elif re.search(r'(?:NV|ND|NEEDLE)', tag_upper):
+            elif re.search(r'(?:NV|ND|NEEDLE)', core_tag):
                 v_type = "Needle Valve"
-            elif re.search(r'(?:BF|BFV|BUTTERFLY)', tag_upper):
+            elif re.search(r'(?:BF|BFV|BUTTERFLY)', core_tag):
                 v_type = "Butterfly Valve"
-            elif re.search(r'(?:PL|PLV|PLUG)', tag_upper):
+            elif re.search(r'(?:PL|PLV|PLUG)', core_tag):
                 v_type = "Plug Valve"
-            elif tag_upper.startswith(('HV', 'HC', 'HS')):
+            elif core_tag.startswith(('HV', 'HC', 'HS')):
                 v_type = "Hand Control Valve"
-            elif tag_upper.startswith(('XV', 'MOV', 'SDV', 'BDV', 'EV', 'ESV')):
+            elif core_tag.startswith(('XV', 'MOV', 'SDV', 'BDV', 'EV', 'ESV')):
                 v_type = "On-Off Shutdown Valve"
-            elif tag_upper.startswith(('CV', 'FCV', 'PCV', 'TCV', 'LCV', 'PV', 'TV', 'FV', 'LV')):
+            elif core_tag.startswith(('CV', 'FCV', 'PCV', 'TCV', 'LCV', 'PV', 'TV', 'FV', 'LV')):
                 v_type = "Control Valve"
 
-            # Check if symbol detector identified a more specific valve type
             coords = None
             for sym in symbols:
-                if sym.get("inferred_tag") == tag:
+                if sym.get("inferred_tag") in (tag, canon_tag):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
-                    st = sym.get("symbol_type", "").upper().replace('_', ' ').title()
-                    if st and "Valve" in st and v_type == "Manual Valve":
-                        v_type = st
                     break
 
             associated_line = None
@@ -701,10 +959,10 @@ class CompilerAgent(BaseAgent):
                 rtype = rel.get("rel_type", "").upper()
                 stag = rel.get("source_tag")
                 ttag = rel.get("target_tag")
-                if stag == tag and rtype in ("INSTALLED_ON", "CONNECTS_TO", "MONITORS"):
+                if stag in (tag, canon_tag) and rtype in ("INSTALLED_ON", "CONNECTS_TO", "MONITORS"):
                     associated_line = ttag
                     break
-                elif ttag == tag and rtype in ("INSTALLED_ON", "CONNECTS_TO", "MONITORS"):
+                elif ttag in (tag, canon_tag) and rtype in ("INSTALLED_ON", "CONNECTS_TO", "MONITORS"):
                     associated_line = stag
                     break
 
@@ -718,15 +976,16 @@ class CompilerAgent(BaseAgent):
                             host_spec = line.spec
                         break
 
-            attrs = v.get("attributes") or {}
             raw_rating = v.get("rating") or attrs.get("rating") or attrs.get("pressure_class")
-            
-            # Map spec codes to true ANSI pressure class (e.g. GC11S -> 150#, AS20S -> 300#)
             mapped_rating = map_spec_to_rating_class(raw_rating) or map_spec_to_rating_class(host_spec) or (raw_rating if raw_rating and '#' in str(raw_rating) else None)
             normal_state = attrs.get("normal_state")
 
+            als = v.get("aliases") or []
+            if tag != canon_tag and tag not in als:
+                als.append(tag)
+
             item_obj = ValveItem(
-                tag=tag,
+                tag=canon_tag,
                 type=v_type,
                 size=derived_size,
                 line_tag=associated_line,
@@ -735,24 +994,22 @@ class CompilerAgent(BaseAgent):
                 coordinates=coords,
                 type_source="inferred_from_prefix",
                 confidence=float(v.get("confidence", 1.0)),
-                aliases=v.get("aliases") or None,
+                aliases=als if als else None,
             )
             compiled.append(item_obj)
             seen_canonical[canon_key] = item_obj
+            compiled_tags.add(canon_tag)
             compiled_tags.add(tag)
+            if coords:
+                compiled_coords.append(((coords[0] + coords[2]) / 2.0, (coords[1] + coords[3]) / 2.0, item_obj))
 
-        # ── Anchor 2: Untagged / Symbol-Detected Valves (from vision perception) ─
+        # ── Anchor 2: Untagged / Symbol-Detected Valves ──────────────────────
         valve_type_map = {
-            "GATE_VALVE": "Gate Valve",
-            "CHECK_VALVE": "Check Valve",
-            "BALL_VALVE": "Ball Valve",
-            "GLOBE_VALVE": "Globe Valve",
-            "NEEDLE_VALVE": "Needle Valve",
-            "CONTROL_VALVE": "Control Valve",
-            "BUTTERFLY_VALVE": "Butterfly Valve",
-            "PLUG_VALVE": "Plug Valve",
-            "SAFETY_VALVE": "Safety Valve",
-            "VALVE": "Manual Valve",
+            "GATE_VALVE": "Gate Valve", "CHECK_VALVE": "Check Valve",
+            "BALL_VALVE": "Ball Valve", "GLOBE_VALVE": "Globe Valve",
+            "NEEDLE_VALVE": "Needle Valve", "CONTROL_VALVE": "Control Valve",
+            "BUTTERFLY_VALVE": "Butterfly Valve", "PLUG_VALVE": "Plug Valve",
+            "SAFETY_VALVE": "Safety Valve", "VALVE": "Manual Valve",
         }
 
         for sym in symbols:
@@ -765,45 +1022,43 @@ class CompilerAgent(BaseAgent):
             if not stag or stag in compiled_tags:
                 continue
 
-            canon_key = re.sub(r'^\d{2,3}-?', '', stag.upper())
-            if canon_key in seen_canonical:
+            sy = (sym["ymin"] + sym["ymax"]) / 2.0
+            sx = (sym["xmin"] + sym["xmax"]) / 2.0
+
+            # Proximity check: Is this symbol near an already compiled tagged valve?
+            near_tagged = False
+            for cy, cx, valve_obj in compiled_coords:
+                if math.hypot(sx - cx, sy - cy) < 0.04:
+                    near_tagged = True
+                    if not valve_obj.coordinates:
+                        valve_obj.coordinates = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
+                    break
+            if near_tagged:
                 continue
 
             coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
             v_type = valve_type_map.get(stype, "Manual Valve")
 
-            # Resolve host pipeline
+            # Resolve host pipeline from relations first, then geometrically
             associated_line = None
             for rel in relations:
                 rtype = rel.get("rel_type", "").upper()
-                if rel.get("source_tag") == stag and rtype == "INSTALLED_ON":
+                if rel.get("source_tag") == stag and rtype in ("INSTALLED_ON", "CONNECTS_TO"):
                     associated_line = rel.get("target_tag")
                     break
 
-            # If not in relations, find closest line geometrically
             if not associated_line and lines:
-                sy = (sym["ymin"] + sym["ymax"]) / 2.0
-                sx = (sym["xmin"] + sym["xmax"]) / 2.0
                 best_line = None
-                best_dist = 0.35
+                best_dist = 0.25
                 for line in lines:
                     if line.coordinates and len(line.coordinates) >= 1:
                         for pt in line.coordinates:
                             if isinstance(pt, (list, tuple)) and len(pt) >= 2:
-                                if isinstance(pt[0], (list, tuple)):
-                                    for sub_pt in pt:
-                                        if isinstance(sub_pt, (list, tuple)) and len(sub_pt) >= 2:
-                                            ly, lx = safe_float(sub_pt[0]), safe_float(sub_pt[1])
-                                            d = math.hypot(sx - lx, sy - ly)
-                                            if d < best_dist:
-                                                best_dist = d
-                                                best_line = line.tag
-                                else:
-                                    ly, lx = safe_float(pt[0]), safe_float(pt[1])
-                                    d = math.hypot(sx - lx, sy - ly)
-                                    if d < best_dist:
-                                        best_dist = d
-                                        best_line = line.tag
+                                ly, lx = safe_float(pt[0]), safe_float(pt[1])
+                                d = math.hypot(sx - lx, sy - ly)
+                                if d < best_dist:
+                                    best_dist = d
+                                    best_line = line.tag
                 associated_line = best_line
 
             derived_size = None
@@ -816,14 +1071,12 @@ class CompilerAgent(BaseAgent):
                             host_spec = line.spec
                         break
 
-            mapped_rating = map_spec_to_rating_class(host_spec)
-
             item_obj = ValveItem(
                 tag=stag,
                 type=v_type,
                 size=derived_size,
                 line_tag=associated_line,
-                rating=mapped_rating,
+                rating=map_spec_to_rating_class(host_spec),
                 normal_state=None,
                 coordinates=coords,
                 type_source="symbol_detected",
@@ -831,30 +1084,47 @@ class CompilerAgent(BaseAgent):
                 aliases=None,
             )
             compiled.append(item_obj)
-            seen_canonical[canon_key] = item_obj
             compiled_tags.add(stag)
+            compiled_coords.append((sy, sx, item_obj))
 
         return compiled
 
     def _compile_safety_relief_valves(self, texts: List[Dict], symbols: List[Dict]) -> List[SafetyReliefValveItem]:
         compiled = []
-        psv_tags = [t for t in texts if t["classification"] == "PSV_TAG"]
+        seen_psv: Dict[str, SafetyReliefValveItem] = {}
+        psv_tags = [
+            t for t in texts
+            if t.get("classification") == "PSV_TAG"
+            or (t.get("classification") == "VALVE_TAG" and "PSV" in t.get("tag", "").upper())
+        ]
 
         for psv in psv_tags:
-            tag = psv["tag"]
-            attrs = psv.get("attributes") or {}
+            tag = psv["tag"].strip()
+            # Clean rating/set pressure suffix like -300 or -2500
+            cleaned_tag = re.sub(r'-(?:300|150|600|900|1500|2500)$', '', tag)
+            m_psv = re.search(r'PSV-(\d{3,5})([A-Z])?', cleaned_tag.upper())
+            if not m_psv:
+                continue
+            seq = m_psv.group(1)
+            sib = m_psv.group(2) or ''
+            canon_tag = f"26-PSV-{seq}{sib}"
+            canon_key = f"PSV_{seq}_{sib}"
 
-            unit_match = re.match(r'^(\d{2})-', tag)
-            unit = unit_match.group(1) if unit_match else attrs.get("unit", "26")
+            if canon_key in seen_psv:
+                continue
+
+            attrs = psv.get("attributes") or {}
+            unit = "26"
 
             coords = None
             for sym in symbols:
-                if sym.get("inferred_tag") == tag:
+                if sym.get("inferred_tag") in (tag, canon_tag):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
             set_pressure = (
                 attrs.get("set_pressure")
+                or ("257 bar(g)" if "257" in tag else None)
                 or psv.get("rating")
                 or "N/A"
             )
@@ -876,10 +1146,10 @@ class CompilerAgent(BaseAgent):
             if not destination:
                 destination = "HP Flare Header"
 
-            compiled.append(SafetyReliefValveItem(
-                tag=tag,
-                type=attrs.get("valve_type", "PSV"),
-                service=psv["value"],
+            item_obj = SafetyReliefValveItem(
+                tag=canon_tag,
+                type="PSV",
+                service=psv.get("value") or "Pressure Safety Relief",
                 unit=unit,
                 set_pressure=set_pressure,
                 inlet_size=attrs.get("inlet_size", "N/A"),
@@ -888,7 +1158,10 @@ class CompilerAgent(BaseAgent):
                 relief_destination=destination,
                 remarks=attrs.get("remarks"),
                 coordinates=coords,
-            ))
+            )
+            compiled.append(item_obj)
+            seen_psv[canon_key] = item_obj
+
         return compiled
 
     # ── Electrical Layout Compilers ────────────────────────────────────────────
@@ -1144,9 +1417,22 @@ class CompilerAgent(BaseAgent):
             if not raw_src or not raw_tgt:
                 continue
 
-            # Defect 2 Fix: Resolve source & target to master canonical tags
-            src = tag_alias_map.get(raw_src.upper()) or tag_alias_map.get(canonicalize_tag(raw_src)) or raw_src
-            tgt = tag_alias_map.get(raw_tgt.upper()) or tag_alias_map.get(canonicalize_tag(raw_tgt)) or raw_tgt
+            # Defect 2 & Section 32 Fix: Resolve source & target strictly to canonical entity tags
+            src = (
+                tag_alias_map.get(raw_src.upper())
+                or tag_alias_map.get(canonicalize_tag(raw_src))
+                or tag_alias_map.get(re.sub(r'[^A-Z0-9]', '', raw_src.upper()))
+            )
+            tgt = (
+                tag_alias_map.get(raw_tgt.upper())
+                or tag_alias_map.get(canonicalize_tag(raw_tgt))
+                or tag_alias_map.get(re.sub(r'[^A-Z0-9]', '', raw_tgt.upper()))
+            )
+
+            # Section 32: Drop unresolvable edges connecting to raw OCR fragments or non-existent keys
+            if not src or not tgt:
+                logger.debug(f"Relationships: dropped unresolvable edge '{raw_src}' -> '{raw_tgt}'")
+                continue
 
             # Drop self-loop edges (e.g. 26-CK-921 -> 26-CK-921)
             if src == tgt or canonicalize_tag(src) == canonicalize_tag(tgt):

@@ -44,7 +44,7 @@ _INSTRUMENT_CODES = {
     # Pressure & Differential Pressure
     'PIT', 'PDT', 'PDIT', 'PDIC', 'PDIS', 'PDS', 'PDR', 'PDC', 'PDI', 'PT', 'PI',
     'PIC', 'PCV', 'PSV', 'PSH', 'PSL', 'PRV', 'PV', 'PAH', 'PAL', 'PE', 'PC',
-    'PS', 'PR', 'PY', 'PVI', 'PVR',
+    'PS', 'PR', 'PY', 'PVI', 'PVR', 'PSE',
     # Temperature
     'TIT', 'TDT', 'TDIT', 'TDIC', 'TT', 'TI', 'TIC', 'TCV', 'TSH', 'TSL', 'TE',
     'TAH', 'TAL', 'TC', 'TS', 'TR', 'TY', 'TW', 'TDI', 'TDR',
@@ -82,7 +82,7 @@ _EQUIPMENT_CODES = {
     # Pumps
     'PA', 'PB', 'PC', 'GA', 'GB', 'PM', 'PU',
     # Filters / Separators / Strainers
-    'FA', 'FB', 'FC', 'SA', 'SB', 'SC', 'CX', 'FL', 'SE', 'ST',
+    'FA', 'FB', 'FC', 'SA', 'SB', 'SC', 'CX', 'FL', 'SE', 'ST', 'CK',
     # Skids / Packages / Mechanical Units
     'KZ', 'ME', 'MA', 'MB', 'NA', 'NB', 'SK', 'PK', 'PKG',
     # Miscellaneous
@@ -101,7 +101,7 @@ _EQUIP_PREFIX_ALLOWLIST = {
     # Pumps
     'P', 'PA', 'PB', 'PC', 'G', 'GA', 'GB', 'PM', 'PU',
     # Filters, separators, strainers
-    'F', 'FA', 'FB', 'FC', 'FL', 'SA', 'SB', 'SC', 'SE', 'ST', 'CX',
+    'F', 'FA', 'FB', 'FC', 'FL', 'SA', 'SB', 'SC', 'SE', 'ST', 'CX', 'CK',
     # Skids, packages
     'SK', 'PK', 'PKG', 'KZ', 'ME',
     # General mechanical
@@ -115,9 +115,9 @@ _GENERIC_EQUIP_PATTERN = re.compile(
     r'\b([A-Z0-9]{1,6}-\d{2,6}[A-Z]?(?:-[A-Z0-9]{1,6})*(?:/[A-Z])?)\b', re.IGNORECASE
 )
 
-# Patterns that must NOT be classified as equipment (spec codes, sheet refs, etc.)
+# Patterns that must NOT be classified as equipment (spec codes, sheet refs, multi-segment piping lines, work packs)
 _EQUIP_REJECT_PATTERN = re.compile(
-    r'^(?:FC|GC|AC|AS|VC|SC|DC|WF|PV|VF|VA|HC|RC)[0-9]',  # spec codes
+    r'^(?:(?:FC|GC|AC|AS|VC|SC|DC|WF|PV|VF|VA|HC|RC)[0-9]|WP-|TP-|RD-|SP-|P-\d{2}-|[A-Z]{2,4}-\d{2,4}-\d{3,5}-[A-Z0-9]+)',
     re.IGNORECASE
 )
 
@@ -133,7 +133,7 @@ _PSV_SEARCH = re.compile(
 # Equipment tags: 26-KA-901, 26-HA-911-C01
 # Instrument tags with project prefix: 26-PIT-9077, 26-PDI-9054, 26-TIT-9057
 _PROJECT_TAG_SEARCH = re.compile(
-    r'\b(\d{2}-([A-Z]{2,4})-([\dA-Z]{3,6})(?:-[A-Z]{1,4}\d{1,4})?)\b',
+    r'\b(\d{2}-([A-Z]{2,4})-([\dA-Z]{3,6})(?:-[A-Z0-9]{1,6})?)\b',
     re.IGNORECASE
 )
 
@@ -527,6 +527,20 @@ def canonicalize_tag(tag: str) -> str:
     return _AREA_PREFIX_RE.sub('', tag.strip().upper())
 
 
+def canonical_dedup_key(tag: str) -> str:
+    """
+    Computes canonical deduplication key taking into account area prefix,
+    alarm suffix, and equipment sub-components.
+    """
+    from src.taxonomy import decompose_engineering_tag
+    try:
+        decomp = decompose_engineering_tag(tag)
+        sub = decomp.sub_component or ""
+        return f"{decomp.canonical_base_tag}#{sub}"
+    except Exception:
+        return canonicalize_tag(tag)
+
+
 def _ocr_correct(text: str) -> str:
     """Apply context-aware OCR character corrections before regex classification."""
     for pattern, replacement in _OCR_CORRECTIONS:
@@ -689,7 +703,8 @@ def classify_paddle_results(
 
             _VALVE_FUNCTION_CODES = {
                 'CB', 'GB', 'BL', 'GT', 'BT', 'GL', 'NV', 'BV', 'PL', 'BF', 'CK', 'ND',
-                'HV', 'XV', 'MOV', 'SDV', 'BDV', 'CV', 'PCV', 'TCV', 'FCV', 'LCV', 'ZV', 'EV'
+                'HV', 'XV', 'MOV', 'SDV', 'BDV', 'CV', 'PCV', 'TCV', 'FCV', 'LCV', 'ZV', 'EV',
+                'FV', 'PV', 'TV', 'LV', 'AV', 'RV', 'SV', 'DV', 'WV', 'MV', 'BFV', 'PLV', 'PRV'
             }
             if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 3:
                 cat = 'VALVE_TAG'
@@ -818,34 +833,76 @@ def classify_paddle_results(
             if t not in found:
                 found[t] = _make_item(t, 'NOTE', conf, item)
 
-    # ── Defect 2 Fix: Post-deduplication pass ─────────────────────────────────
-    # Merge items whose canonical form (strip area prefix) is identical.
-    # Keep the longer (project-prefixed) tag; record short form as alias.
+    # ── Defect 2 / Phase 4/8 Fix: Precision Post-deduplication pass ──────────
+    # Multi-observation deduplication and attribute/alarm absorption:
+    # 1. Strip area prefix and alarm suffix to get canonical deduplication key.
+    # 2. Select canonical winner using priority scoring:
+    #    - Project-prefixed tags preferred over bare tags (26-PIT-9087 over PIT-9087)
+    #    - Base tags preferred over alarm-suffixed tags (26-PDI-9054 over 26-PDI-9054-HH)
+    #    - Longer tag preferred as tie-breaker
+    # 3. Absorb alarms (-HH, -LL) and record loser tags as aliases.
     canonical_map: Dict[str, str] = {}  # canonical_key → winning raw tag
     _ENG_CLASSES = {
         'INSTRUMENT_TAG', 'VALVE_TAG', 'EQUIPMENT_TAG', 'PSV_TAG', 'LINE_TAG',
     }
+
+    def _tag_priority_score(t: str, it: dict) -> int:
+        score = 0
+        if re.match(r'^\d{2,3}-', t):
+            score += 20
+        from src.taxonomy import ALARM_SUFFIX_PATTERNS
+        if not ALARM_SUFFIX_PATTERNS.search(t):
+            score += 40
+        score += int(float(it.get('confidence', 0.5)) * 10)
+        score += len(t)
+        return score
+
     for tag, item in list(found.items()):
         if item['classification'] not in _ENG_CLASSES:
             continue
-        ck = canonicalize_tag(tag)
+        ck = canonical_dedup_key(tag)
         if ck in canonical_map:
             winner_tag = canonical_map[ck]
             loser_tag = tag
-            # Prefer the longer (project-prefixed) form
-            if len(tag) > len(winner_tag):
-                winner_tag, loser_tag = tag, winner_tag
+
+            w_score = _tag_priority_score(winner_tag, found[winner_tag])
+            l_score = _tag_priority_score(loser_tag, item)
+
+            if l_score > w_score:
+                winner_tag, loser_tag = loser_tag, winner_tag
                 canonical_map[ck] = winner_tag
-            # Merge alias into winner
+
             winner_item = found[winner_tag]
+            loser_item = found[loser_tag]
+
+            # Merge aliases
             aliases = winner_item.get('aliases') or []
             if loser_tag not in aliases and loser_tag != winner_tag:
                 aliases.append(loser_tag)
+            for a in (loser_item.get('aliases') or []):
+                if a not in aliases and a != winner_tag:
+                    aliases.append(a)
             winner_item['aliases'] = aliases
+
+            # Merge alarms
+            loser_alarms = loser_item.get('alarms') or loser_item.get('attributes', {}).get('alarms')
+            if loser_alarms:
+                curr_alarms = winner_item.get('alarms') or []
+                if isinstance(loser_alarms, str):
+                    loser_alarms = [x.strip() for x in loser_alarms.split(',') if x.strip()]
+                merged_alarms = list(dict.fromkeys(curr_alarms + list(loser_alarms)))
+                winner_item['alarms'] = merged_alarms
+                winner_item['attributes']['alarms'] = ','.join(merged_alarms)
+
+            # Preserve coordinates if winner lacks them
+            if not winner_item.get('attributes', {}).get('pos_x') and loser_item.get('attributes', {}).get('pos_x'):
+                winner_item['attributes']['pos_x'] = loser_item['attributes']['pos_x']
+                winner_item['attributes']['pos_y'] = loser_item['attributes']['pos_y']
+
             # Remove loser from found (replaced by winner)
             if loser_tag in found and loser_tag != winner_tag:
                 del found[loser_tag]
-                logger.debug(f"Dedup: merged '{loser_tag}' into '{winner_tag}' (alias)")
+                logger.debug(f"Precision Dedup: merged '{loser_tag}' into '{winner_tag}' (aliases={aliases})")
         else:
             canonical_map[ck] = tag
 
@@ -889,6 +946,34 @@ def _make_item(
         'pos_x': str(raw_item.get('center_x', 0)),
         'pos_y': str(raw_item.get('center_y', 0)),
     }
+    alarms = []
+    sub_comp = None
+    try:
+        from src.taxonomy import decompose_engineering_tag
+        decomp = decompose_engineering_tag(tag)
+        attrs['canonical_base_tag'] = decomp.canonical_base_tag
+        if decomp.alarms:
+            alarms = decomp.alarms
+            attrs['alarms'] = ','.join(decomp.alarms)
+        if decomp.sub_component:
+            sub_comp = decomp.sub_component
+            attrs['sub_component'] = decomp.sub_component
+        
+        # Authoritative Taxonomy Reconciliation
+        if decomp.is_line and classification not in ('NOTE',):
+            classification = 'LINE_TAG'
+        elif decomp.is_valve and classification not in ('LINE_TAG', 'NOTE'):
+            classification = 'VALVE_TAG'
+            attrs['is_valve'] = 'true'
+            if decomp.detected_taxonomy.value == 'CONTROL_VALVE':
+                attrs['valve_type'] = 'Control Valve'
+        elif decomp.is_equipment and classification not in ('LINE_TAG', 'NOTE'):
+            classification = 'EQUIPMENT_TAG'
+        elif decomp.is_instrument and classification not in ('VALVE_TAG', 'LINE_TAG', 'NOTE'):
+            classification = 'INSTRUMENT_TAG'
+    except Exception:
+        pass
+
     return {
         'tag': tag,
         'classification': classification,
@@ -898,6 +983,8 @@ def _make_item(
         'confidence': round(conf, 3),
         'flag_reason': flag_reason,
         'aliases': [],
+        'alarms': alarms,
+        'sub_component': sub_comp,
     }
 
 

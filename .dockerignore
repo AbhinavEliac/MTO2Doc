@@ -49,12 +49,13 @@ venv.bak/
 .claude/
 .gemini/
 
-# Large datasets, raw datasets & weights (mount via volume if needed)
+# Large datasets, raw datasets & intermediate training artifacts
+# (Trained weights in training/outputs/yolo_runs/**/weights/ and base models are preserved)
 pid_stuff/
-training/
 runs/
-yolov8m.pt
-yolo26n.pt
+training/outputs/annotations/
+training/outputs/**/*.jpg
+training/outputs/**/*.png
 
 # Extraction databases & runtime logs
 extraction_history.db

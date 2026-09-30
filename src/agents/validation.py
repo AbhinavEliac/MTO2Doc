@@ -98,8 +98,16 @@ class ValidationAgent(BaseAgent):
                 })
 
         logger.info(f"Validation complete. Identified {len(reports)} inconsistencies.")
+
+        validation_feedback = {
+            "missing_connections": [r.get("target_tag") for r in reports if r.get("rule_id") in ("VAL-003", "VAL-004") and r.get("target_tag")],
+            "ambiguous_tags": [r.get("target_tag") for r in reports if r.get("rule_id") == "VAL-001" and r.get("target_tag")],
+            "topology_inconsistencies": [r.get("target_tag") for r in reports if r.get("rule_id") == "VAL-002" and r.get("target_tag")],
+            "classification_doubts": [r.get("target_tag") for r in reports if r.get("rule_id") == "VAL-005" and r.get("target_tag")],
+        }
         
         return {
             "validation_reports": reports,
+            "validation_feedback": validation_feedback,
             "revision_history": state.get("revision_history", []) + [{"action": "Validation checks run", "issues_found": len(reports)}]
         }
