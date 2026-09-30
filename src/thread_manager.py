@@ -44,6 +44,11 @@ def start_extraction_thread(thread_id: str, initial_state: GraphState, filename:
         "max_re_extractions": initial_state.get("max_re_extractions", 3),
     }
 
+    if "metadata" not in initial_state or initial_state["metadata"] is None:
+        initial_state["metadata"] = {}
+    initial_state["metadata"]["thread_id"] = thread_id
+    initial_state["thread_id"] = thread_id
+
     create_thread(thread_id=thread_id, filename=filename, config_dict=config_dict)
 
     cancel_event = threading.Event()

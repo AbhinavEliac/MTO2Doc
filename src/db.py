@@ -52,6 +52,20 @@ def init_db():
                 FOREIGN KEY(thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE
             );
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS run_outputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT,
+                format_type TEXT,
+                filename TEXT,
+                content_type TEXT,
+                data_blob BLOB,
+                file_size INTEGER DEFAULT 0,
+                created_at TEXT,
+                FOREIGN KEY(thread_id) REFERENCES threads(thread_id) ON DELETE CASCADE,
+                UNIQUE(thread_id, format_type)
+            );
+        """)
         conn.commit()
 
 
@@ -197,6 +211,97 @@ def get_thread(thread_id: str) -> Optional[Dict[str, Any]]:
         return thread_data
 
 
+def save_run_output(
+    thread_id: str,
+    format_type: str,
+    filename: str,
+    content_type: str,
+    data: Any,
+) -> None:
+    """
+    Stores or updates a generated deliverable (Excel, JSON, XML, CSV, etc.) for a thread in SQLite.
+    """
+    init_db()
+    if isinstance(data, str):
+        data_bytes = data.encode("utf-8")
+    elif isinstance(data, (bytes, bytearray)):
+        data_bytes = bytes(data)
+    else:
+        data_bytes = str(data).encode("utf-8")
+
+    file_size = len(data_bytes)
+    now = datetime.now().isoformat()
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO run_outputs (thread_id, format_type, filename, content_type, data_blob, file_size, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(thread_id, format_type) DO UPDATE SET
+                filename = excluded.filename,
+                content_type = excluded.content_type,
+                data_blob = excluded.data_blob,
+                file_size = excluded.file_size,
+                created_at = excluded.created_at;
+            """,
+            (thread_id, format_type, filename, content_type, sqlite3.Binary(data_bytes), file_size, now),
+        )
+        conn.commit()
+
+
+def get_run_outputs(thread_id: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Retrieves all stored deliverables for a given thread from SQLite.
+    Returns a dict mapping format_type -> {format_type, filename, content_type, data, file_size, created_at}.
+    """
+    init_db()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT format_type, filename, content_type, data_blob, file_size, created_at FROM run_outputs WHERE thread_id = ?",
+            (thread_id,),
+        )
+        rows = cursor.fetchall()
+        result = {}
+        for r in rows:
+            r_dict = dict(r)
+            result[r_dict["format_type"]] = {
+                "format_type": r_dict["format_type"],
+                "filename": r_dict["filename"],
+                "content_type": r_dict["content_type"],
+                "data": bytes(r_dict["data_blob"]) if r_dict.get("data_blob") else b"",
+                "file_size": r_dict.get("file_size", 0),
+                "created_at": r_dict.get("created_at"),
+            }
+        return result
+
+
+def get_run_output(thread_id: str, format_type: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieves a single deliverable format for a thread from SQLite.
+    """
+    init_db()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT format_type, filename, content_type, data_blob, file_size, created_at FROM run_outputs WHERE thread_id = ? AND format_type = ?",
+            (thread_id, format_type),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        r_dict = dict(row)
+        return {
+            "format_type": r_dict["format_type"],
+            "filename": r_dict["filename"],
+            "content_type": r_dict["content_type"],
+            "data": bytes(r_dict["data_blob"]) if r_dict.get("data_blob") else b"",
+            "file_size": r_dict.get("file_size", 0),
+            "created_at": r_dict.get("created_at"),
+        }
+
+
 def delete_thread(thread_id: str):
     init_db()
     t = get_thread(thread_id)
@@ -210,8 +315,18 @@ def delete_thread(thread_id: str):
                 except Exception:
                     pass
 
+    # Cleanup thread-specific output directory if present
+    thread_out_dir = os.path.join(os.getcwd(), "outputs", thread_id)
+    if os.path.exists(thread_out_dir):
+        import shutil
+        try:
+            shutil.rmtree(thread_out_dir)
+        except Exception:
+            pass
+
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM thread_logs WHERE thread_id = ?", (thread_id,))
+        cursor.execute("DELETE FROM run_outputs WHERE thread_id = ?", (thread_id,))
         cursor.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
         conn.commit()

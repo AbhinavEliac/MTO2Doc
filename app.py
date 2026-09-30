@@ -1,10 +1,11 @@
 """
-SID-AI — Universal Engineering Drawing Intelligence Dashboard.
+PID Data Extractor — Piping & Instrumentation Diagram Intelligence Dashboard.
 
 Supports thread persistence in SQLite, background extraction execution,
 live progress tracking, cancel functionality, and historical error logs.
 """
 import os
+import re
 import time
 import uuid
 import logging
@@ -21,7 +22,9 @@ from src.db import (
     get_all_threads,
     get_thread,
     delete_thread,
+    get_run_outputs,
 )
+from src.agents.output_generator import ensure_thread_deliverables_in_db
 from src.thread_manager import (
     start_extraction_thread,
     cancel_extraction_thread,
@@ -54,13 +57,197 @@ def format_duration(seconds: Optional[float]) -> str:
     s = sec % 60
     return f"{m:02d}m {s:02d}s"
 
+
+def _item_to_dict(item):
+    if hasattr(item, "model_dump"):
+        return item.model_dump()
+    elif isinstance(item, dict):
+        return item
+    return dict(item)
+
+
+def render_download_buttons(thread_id: str, filename: str = "drawing", key_prefix: str = "dl"):
+    """
+    Renders download buttons for all 6 engineering deliverable formats stored in SQLite.
+    """
+    deliverables = ensure_thread_deliverables_in_db(thread_id)
+    if not deliverables:
+        st.info("No export deliverables available for this thread.")
+        return
+
+    base_name = os.path.splitext(filename or "drawing")[0]
+    clean_base = re.sub(r'[^a-zA-Z0-9_\-]', '_', base_name)[:24]
+
+    st.markdown("<div style='margin-bottom: 8px; font-weight: 500;'>📥 Deliverables Persisted in Database (Ready for On-Demand Download):</div>", unsafe_allow_html=True)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+    # 1. Excel
+    if "excel" in deliverables:
+        item = deliverables["excel"]
+        sz = f" ({item['file_size']/1024:.1f} KB)" if item.get("file_size") else ""
+        col1.download_button(
+            label=f"📊 Excel{sz}",
+            data=item["data"],
+            file_name=f"{clean_base}_deliverables.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"{key_prefix}_excel_{thread_id}",
+            use_container_width=True,
+            help="Multi-sheet Excel workbook with P&ID line, instrument, valve & equipment schedules",
+        )
+
+    # 2. JSON Graph
+    if "json_graph" in deliverables:
+        item = deliverables["json_graph"]
+        sz = f" ({item['file_size']/1024:.1f} KB)" if item.get("file_size") else ""
+        col2.download_button(
+            label=f"🕸️ JSON{sz}",
+            data=item["data"],
+            file_name=f"{clean_base}_master_graph.json",
+            mime="application/json",
+            key=f"{key_prefix}_json_{thread_id}",
+            use_container_width=True,
+            help="Master P&ID engineering graph schema in JSON",
+        )
+
+    # 3. AVEVA XML
+    if "aveva_xml" in deliverables:
+        item = deliverables["aveva_xml"]
+        sz = f" ({item['file_size']/1024:.1f} KB)" if item.get("file_size") else ""
+        col3.download_button(
+            label=f"📐 AVEVA XML{sz}",
+            data=item["data"],
+            file_name=f"{clean_base}_aveva_diagrams.xml",
+            mime="application/xml",
+            key=f"{key_prefix}_xml_{thread_id}",
+            use_container_width=True,
+            help="P&ID XML hierarchy for AVEVA Diagrams & SP3D",
+        )
+
+    # 4. COMOS JSON
+    if "comos_json" in deliverables:
+        item = deliverables["comos_json"]
+        sz = f" ({item['file_size']/1024:.1f} KB)" if item.get("file_size") else ""
+        col4.download_button(
+            label=f"🔧 COMOS{sz}",
+            data=item["data"],
+            file_name=f"{clean_base}_comos_hierarchy.json",
+            mime="application/json",
+            key=f"{key_prefix}_comos_{thread_id}",
+            use_container_width=True,
+            help="P&ID object taxonomy for Siemens COMOS",
+        )
+
+    # 5. SPPID CSV
+    if "sppid_csv" in deliverables:
+        item = deliverables["sppid_csv"]
+        sz = f" ({item['file_size']/1024:.1f} KB)" if item.get("file_size") else ""
+        col5.download_button(
+            label=f"🗃️ SmartPlant{sz}",
+            data=item["data"],
+            file_name=f"{clean_base}_sppid_tables.csv",
+            mime="text/csv",
+            key=f"{key_prefix}_sppid_{thread_id}",
+            use_container_width=True,
+            help="Relational CSV tables for SmartPlant P&ID (SPPID) import",
+        )
+
+    # 6. Relationships CSV
+    if "relationships_csv" in deliverables:
+        item = deliverables["relationships_csv"]
+        sz = f" ({item['file_size']/1024:.1f} KB)" if item.get("file_size") else ""
+        col6.download_button(
+            label=f"🔗 Relations{sz}",
+            data=item["data"],
+            file_name=f"{clean_base}_relationships.csv",
+            mime="text/csv",
+            key=f"{key_prefix}_rel_{thread_id}",
+            use_container_width=True,
+            help="P&ID topological relationships with confidence and evidence vectors",
+        )
+
+
+def render_graph_output_tables(graph, drawing_type: str = "PID"):
+    """
+    Renders extracted P&ID entities in tabbed pandas DataFrames with on-screen inspection.
+    """
+    if not graph:
+        st.info("No P&ID engineering graph data available to display.")
+        return
+
+    lines = getattr(graph, 'lines', []) or []
+    instruments = getattr(graph, 'instruments', []) or []
+    valves = getattr(graph, 'valves', []) or []
+    safety_relief_valves = getattr(graph, 'safety_relief_valves', []) or []
+    equipment = getattr(graph, 'equipment', []) or []
+    relationships = getattr(graph, 'relationships', []) or []
+    annotations = getattr(graph, 'annotations', []) or []
+
+    tab_line, tab_inst, tab_valve, tab_psv, tab_eq = st.tabs([
+        f"📏 Line List ({len(lines)})",
+        f"🔵 Instrument List ({len(instruments)})",
+        f"🔧 Valve List ({len(valves)})",
+        f"🛡️ Safety Relief Valves ({len(safety_relief_valves)})",
+        f"⚙️ Equipment List ({len(equipment)})",
+    ])
+    with tab_line:
+        st.subheader("Line List (Piping Segments & Specs)")
+        if lines:
+            df = pd.DataFrame([_item_to_dict(l) for l in lines]).drop(columns=["coordinates"], errors="ignore")
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No piping lines detected.")
+
+    with tab_inst:
+        st.subheader("Instrument List (Field, Panel & DCS Loops)")
+        if instruments:
+            df = pd.DataFrame([_item_to_dict(i) for i in instruments]).drop(columns=["coordinates"], errors="ignore")
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No instruments detected.")
+
+    with tab_valve:
+        st.subheader("Manual & Inline Valve List")
+        if valves:
+            df = pd.DataFrame([_item_to_dict(v) for v in valves]).drop(columns=["coordinates"], errors="ignore")
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No valves detected.")
+
+    with tab_psv:
+        st.subheader("Safety Relief Valve List (PSV / PRV)")
+        if safety_relief_valves:
+            df = pd.DataFrame([_item_to_dict(p) for p in safety_relief_valves]).drop(columns=["coordinates"], errors="ignore")
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No safety relief valves detected.")
+
+    with tab_eq:
+        st.subheader("Equipment List (Vessels, Pumps, Compressors, Tanks)")
+        if equipment:
+            df = pd.DataFrame([_item_to_dict(e) for e in equipment]).drop(columns=["coordinates"], errors="ignore")
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No equipment detected.")
+
+    # Relationships
+    if relationships:
+        with st.expander(f"🔗 Engineering Topology & Linkages ({len(relationships)})", expanded=False):
+            df = pd.DataFrame([_item_to_dict(r) for r in relationships])
+            st.dataframe(df, use_container_width=True)
+
+    if annotations:
+        with st.expander(f"📝 Drawing Notes & Elevation Labels ({len(annotations)})", expanded=False):
+            df = pd.DataFrame([_item_to_dict(a) for a in annotations])
+            st.dataframe(df, use_container_width=True)
+
+
 # Initialize SQLite Database on app load
 init_db()
 
 # ─── Page Configuration ────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SID-AI | Universal Engineering Drawing Intelligence",
-    page_icon="⚙️",
+    page_title="PID Data Extractor",
+    page_icon="📐",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -151,10 +338,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── App Header ────────────────────────────────────────────────────────────────
-st.markdown("<div class='main-title'>⚙️ SID-AI</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>📐 PID Data Extractor</div>", unsafe_allow_html=True)
 st.markdown(
-    "<div class='sub-title'>Universal Engineering Drawing Intelligence — "
-    "P&ID · Electrical · Earthing · SLD · HVAC · Structural · and more</div>",
+    "<div class='sub-title'>Intelligent Piping & Instrumentation Diagram (P&ID) Data Extraction & Digital Twin Engine</div>",
     unsafe_allow_html=True,
 )
 
@@ -396,8 +582,8 @@ if all_threads:
         for t in all_threads:
             tid = t["thread_id"]
             status = t["status"]
-            fname = t.get("filename", "Drawing")
-            dt_label = t.get("drawing_type", "GENERIC")
+            fname = t.get("filename", "P&ID Drawing")
+            dt_label = "P&ID"
             created = t.get("created_at", "")[:19].replace("T", " ")
 
             status_icon = "🟢" if status == "COMPLETED" else "🔵" if status == "RUNNING" else "❌" if status == "FAILED" else "⛔"
@@ -436,14 +622,14 @@ tab_main_dashboard, tab_main_history = st.tabs([
 # ─── TAB 1: CURRENT EXTRACTION DASHBOARD ───────────────────────────────────────
 with tab_main_dashboard:
     # Upload Section
-    st.markdown("<div class='section-header'>📂 Document Upload & Extraction Trigger</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>📂 P&ID Document Upload & Extraction Trigger</div>", unsafe_allow_html=True)
     col1, col2 = st.columns(2)
 
     with col1:
         uploaded_drawing = st.file_uploader(
-            "Upload Engineering Drawing (PDF, PNG, JPG)",
+            "Upload P&ID Drawing (PDF, PNG, JPG)",
             type=["pdf", "png", "jpg", "jpeg"],
-            help="Upload any engineering drawing — P&ID, Electrical Layout, Earthing, SLD, HVAC, Structural, etc.",
+            help="Upload Piping & Instrumentation Diagram (P&ID or PFD) drawing.",
         )
 
     with col2:
@@ -451,7 +637,7 @@ with tab_main_dashboard:
             "Upload Legend Sheets or Reference Documents (Optional)",
             type=["pdf", "png", "jpg"],
             accept_multiple_files=True,
-            help="Provide symbol legends, client coding standards, or specification sheets.",
+            help="Provide P&ID symbol legends, client piping specs, or instrument tagging standards.",
         )
 
     run_pipeline = st.button(
@@ -481,7 +667,7 @@ with tab_main_dashboard:
 
         initial_state: GraphState = {
             "raw_documents": raw_docs,
-            "metadata": {},
+            "metadata": {"drawing_type": "PID", "discipline": "Piping & Instrumentation"},
             "engineering_context": {},
             "extracted_entities": {
                 "text_elements": [],
@@ -584,24 +770,23 @@ with tab_main_dashboard:
                 re_runs = result_state.get("re_extraction_count", 0)
                 revision_history = result_state.get("revision_history", [])
 
-                drawing_type = active_thread.get("drawing_type") or metadata.get("drawing_type", "GENERIC")
-                discipline = active_thread.get("discipline") or metadata.get("discipline", "Unknown")
+                drawing_type = active_thread.get("drawing_type") or metadata.get("drawing_type", "PID")
+                discipline = active_thread.get("discipline") or metadata.get("discipline", "Piping & Instrumentation")
+                if discipline in ("Unknown", None, "GENERIC"):
+                    discipline = "Piping & Instrumentation"
 
-                from src.utils.drawing_type_detector import DRAWING_TYPE_LABELS, DrawingType
-                try:
-                    dtype_enum = DrawingType(drawing_type)
-                    dtype_info = DRAWING_TYPE_LABELS.get(dtype_enum, {"label": drawing_type, "icon": "📋", "discipline": discipline})
-                except Exception:
-                    dtype_info = {"label": drawing_type, "icon": "📋", "discipline": discipline}
+                dt_label = "P&ID (Piping & Instrumentation Diagram)"
+                if drawing_type and drawing_type.upper() in ("PFD", "PROCESS FLOW DIAGRAM"):
+                    dt_label = "PFD (Process Flow Diagram)"
 
                 st.markdown(
-                    f"<div class='dtype-badge'>{dtype_info['icon']} {dtype_info['label']}"
+                    f"<div class='dtype-badge'>📐 {dt_label}"
                     f"<span class='discipline-chip'>{discipline}</span></div>",
                     unsafe_allow_html=True,
                 )
 
                 # Metadata Block
-                st.markdown("<div class='section-header'>📋 Drawing Metadata</div>", unsafe_allow_html=True)
+                st.markdown("<div class='section-header'>📋 P&ID Drawing Metadata</div>", unsafe_allow_html=True)
                 col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
                 with col_m1:
                     st.markdown(f"<div class='metric-card'><div class='metric-lbl'>Drawing Title</div><div class='metric-val'>{metadata.get('title', 'N/A')}</div></div>", unsafe_allow_html=True)
@@ -619,234 +804,8 @@ with tab_main_dashboard:
 
                 # Extracted Data Tabs
                 if graph:
-                    st.markdown("<div class='section-header'>📊 Extracted Data</div>", unsafe_allow_html=True)
-                    dt = drawing_type.upper()
-
-                    if dt in ('PID', 'PFD', 'ISOMETRIC'):
-                        tab_line, tab_inst, tab_valve, tab_psv, tab_eq = st.tabs([
-                            f"📏 Line List ({len(graph.lines)})",
-                            f"🔵 Instrument List ({len(graph.instruments)})",
-                            f"🔧 Valve List ({len(graph.valves)})",
-                            f"🛡️ Safety Relief Valves ({len(graph.safety_relief_valves)})",
-                            f"⚙️ Equipment List ({len(graph.equipment)})",
-                        ])
-                        with tab_line:
-                            st.subheader("Line List (Piping Segments)")
-                            if graph.lines:
-                                df = pd.DataFrame([l.model_dump() for l in graph.lines]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No piping lines detected.")
-
-                        with tab_inst:
-                            st.subheader("Instrument List")
-                            if graph.instruments:
-                                df = pd.DataFrame([i.model_dump() for i in graph.instruments]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No instruments detected.")
-
-                        with tab_valve:
-                            st.subheader("Manual Valve List")
-                            if graph.valves:
-                                df = pd.DataFrame([v.model_dump() for v in graph.valves]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No valves detected.")
-
-                        with tab_psv:
-                            st.subheader("Safety Relief Valve List")
-                            if graph.safety_relief_valves:
-                                df = pd.DataFrame([p.model_dump() for p in graph.safety_relief_valves]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No safety relief valves detected.")
-
-                        with tab_eq:
-                            st.subheader("Equipment List")
-                            if graph.equipment:
-                                df = pd.DataFrame([e.model_dump() for e in graph.equipment]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No equipment detected.")
-
-                    elif dt == 'ELECTRICAL_LAYOUT':
-                        tab_lum, tab_panel, tab_cable, tab_eq, tab_ann = st.tabs([
-                            f"💡 Luminaires ({len(graph.luminaires)})",
-                            f"⚡ Distribution Boards ({len(graph.panels)})",
-                            f"🔌 Cables & Circuits ({len(graph.cables)})",
-                            f"⚙️ Equipment ({len(graph.equipment)})",
-                            f"📝 Annotations ({len(graph.annotations)})",
-                        ])
-                        with tab_lum:
-                            st.subheader("Luminaire / Lighting Fitting List")
-                            if graph.luminaires:
-                                df = pd.DataFrame([l.model_dump() for l in graph.luminaires]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No luminaires detected.")
-
-                        with tab_panel:
-                            st.subheader("Distribution Boards & Panels")
-                            if graph.panels:
-                                df = pd.DataFrame([p.model_dump() for p in graph.panels]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No panels/DBs detected.")
-
-                        with tab_cable:
-                            st.subheader("Cables & Circuits")
-                            if graph.cables:
-                                df = pd.DataFrame([c.model_dump() for c in graph.cables]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No cables/circuits detected.")
-
-                        with tab_eq:
-                            st.subheader("Equipment List")
-                            if graph.equipment:
-                                df = pd.DataFrame([e.model_dump() for e in graph.equipment]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No equipment detected.")
-
-                        with tab_ann:
-                            st.subheader("Elevation Labels & Annotations")
-                            if graph.annotations:
-                                df = pd.DataFrame([a.model_dump() for a in graph.annotations])
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No annotations detected.")
-
-                    elif dt == 'EARTHING_LAYOUT':
-                        tab_earth, tab_eq, tab_ann = st.tabs([
-                            f"⏚ Earthing Components ({len(graph.earthing_components)})",
-                            f"⚙️ Equipment / Structures ({len(graph.equipment)})",
-                            f"📝 Notes & Elevations ({len(graph.annotations)})",
-                        ])
-                        with tab_earth:
-                            st.subheader("Earthing Components (Bars, Pits, Conductors)")
-                            if graph.earthing_components:
-                                df = pd.DataFrame([e.model_dump() for e in graph.earthing_components]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No earthing components detected.")
-
-                        with tab_eq:
-                            st.subheader("Earthed Equipment & Structures")
-                            if graph.equipment:
-                                df = pd.DataFrame([e.model_dump() for e in graph.equipment]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No equipment detected.")
-
-                        with tab_ann:
-                            st.subheader("Installation Notes & Elevation Labels")
-                            if graph.annotations:
-                                df = pd.DataFrame([a.model_dump() for a in graph.annotations])
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No annotations detected.")
-
-                    elif dt == 'SLD':
-                        tab_panel, tab_cable, tab_eq, tab_ann = st.tabs([
-                            f"🏗️ Switchgear & Panels ({len(graph.panels)})",
-                            f"🔌 Feeders & Breakers ({len(graph.cables)})",
-                            f"⚙️ Loads & Equipment ({len(graph.equipment)})",
-                            f"📝 Ratings & Notes ({len(graph.annotations)})",
-                        ])
-                        with tab_panel:
-                            st.subheader("Switchgear, Busbars & Panels")
-                            if graph.panels:
-                                df = pd.DataFrame([p.model_dump() for p in graph.panels]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No panels detected.")
-
-                        with tab_cable:
-                            st.subheader("Feeders & Circuit Breakers")
-                            if graph.cables:
-                                df = pd.DataFrame([c.model_dump() for c in graph.cables]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No feeders/breakers detected.")
-
-                        with tab_eq:
-                            st.subheader("Loads & Equipment")
-                            if graph.equipment:
-                                df = pd.DataFrame([e.model_dump() for e in graph.equipment]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No equipment detected.")
-
-                        with tab_ann:
-                            st.subheader("Ratings & Notes")
-                            if graph.annotations:
-                                df = pd.DataFrame([a.model_dump() for a in graph.annotations])
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No annotations detected.")
-
-                    elif dt == 'CABLE_SCHEDULE':
-                        tab_cable, tab_panel, tab_ann = st.tabs([
-                            f"🔌 Cable Schedule ({len(graph.cables)})",
-                            f"⚡ Panels ({len(graph.panels)})",
-                            f"📝 Notes ({len(graph.annotations)})",
-                        ])
-                        with tab_cable:
-                            if graph.cables:
-                                df = pd.DataFrame([c.model_dump() for c in graph.cables]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No cables detected.")
-                        with tab_panel:
-                            if graph.panels:
-                                df = pd.DataFrame([p.model_dump() for p in graph.panels]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No panels detected.")
-                        with tab_ann:
-                            if graph.annotations:
-                                df = pd.DataFrame([a.model_dump() for a in graph.annotations])
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No annotations detected.")
-
-                    else:
-                        tab_eq, tab_generic, tab_ann = st.tabs([
-                            f"⚙️ Equipment ({len(graph.equipment)})",
-                            f"🔩 Components ({len(graph.generic_components)})",
-                            f"📝 Notes & Annotations ({len(graph.annotations)})",
-                        ])
-                        with tab_eq:
-                            st.subheader("Equipment List")
-                            if graph.equipment:
-                                df = pd.DataFrame([e.model_dump() for e in graph.equipment]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No equipment detected.")
-
-                        with tab_generic:
-                            st.subheader("Detected Components")
-                            if graph.generic_components:
-                                df = pd.DataFrame([g.model_dump() for g in graph.generic_components]).drop(columns=["coordinates"], errors="ignore")
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No components detected.")
-
-                        with tab_ann:
-                            st.subheader("Annotations & Notes")
-                            if graph.annotations:
-                                df = pd.DataFrame([a.model_dump() for a in graph.annotations])
-                                st.dataframe(df, use_container_width=True)
-                            else:
-                                st.info("No annotations detected.")
-
-                    # Relationships
-                    if graph.relationships:
-                        with st.expander(f"🔗 Engineering Relationships ({len(graph.relationships)})"):
-                            df = pd.DataFrame([r.model_dump() for r in graph.relationships])
-                            st.dataframe(df, use_container_width=True)
+                    st.markdown("<div class='section-header'>📊 P&ID Extracted Data</div>", unsafe_allow_html=True)
+                    render_graph_output_tables(graph, drawing_type)
 
                 # Quality Assurance & Process Log (Consistency Errors & Warnings commented out)
                 # col_v1, col_v2 = st.columns(2)
@@ -879,57 +838,7 @@ with tab_main_dashboard:
 
                 # Export & Download
                 st.markdown("<div class='section-header'>📥 Export & Download</div>", unsafe_allow_html=True)
-                st.markdown("Download deliverables formatted for standard engineering platforms:")
-
-                col_d1, col_d2, col_d3, col_d4, col_d5 = st.columns(5)
-                if deliverables:
-                    if "excel" in deliverables and os.path.exists(deliverables["excel"]):
-                        with open(deliverables["excel"], "rb") as f:
-                            col_d1.download_button(
-                                "📊 Excel Deliverables",
-                                data=f.read(),
-                                file_name="engineering_deliverables.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True,
-                            )
-                    if "json_graph" in deliverables and os.path.exists(deliverables["json_graph"]):
-                        with open(deliverables["json_graph"], "rb") as f:
-                            col_d2.download_button(
-                                "🕸️ JSON Graph",
-                                data=f.read(),
-                                file_name="master_graph.json",
-                                mime="application/json",
-                                use_container_width=True,
-                            )
-                    if "aveva_xml" in deliverables and os.path.exists(deliverables["aveva_xml"]):
-                        with open(deliverables["aveva_xml"], "rb") as f:
-                            col_d3.download_button(
-                                "📐 AVEVA XML",
-                                data=f.read(),
-                                file_name="aveva_diagrams_export.xml",
-                                mime="application/xml",
-                                use_container_width=True,
-                            )
-                    if "comos_json" in deliverables and os.path.exists(deliverables["comos_json"]):
-                        with open(deliverables["comos_json"], "rb") as f:
-                            col_d4.download_button(
-                                "🔧 COMOS JSON",
-                                data=f.read(),
-                                file_name="comos_hierarchy_export.json",
-                                mime="application/json",
-                                use_container_width=True,
-                            )
-                    if "sppid_csv" in deliverables and os.path.exists(deliverables["sppid_csv"]):
-                        with open(deliverables["sppid_csv"], "rb") as f:
-                            col_d5.download_button(
-                                "🗃️ SmartPlant CSV",
-                                data=f.read(),
-                                file_name="sppid_import_tables.csv",
-                                mime="text/csv",
-                                use_container_width=True,
-                            )
-                else:
-                    st.info("No export files generated yet for this thread.")
+                render_download_buttons(active_id, active_thread.get("filename", "drawing"), key_prefix=f"dash_dl_{active_id}")
     else:
         st.info("No active thread selected. Upload a drawing or select a thread from the sidebar.")
 
@@ -957,7 +866,7 @@ with tab_main_history:
             summary_rows.append({
                 "Thread ID": t["thread_id"],
                 "File": t.get("filename"),
-                "Type": t.get("drawing_type"),
+                "Type": "P&ID",
                 "Status": t.get("status"),
                 "Progress": f"{int(t.get('progress', 0)*100)}%",
                 "Duration": format_duration(t.get("duration_sec")),
@@ -975,15 +884,19 @@ with tab_main_history:
             status_icon = "🟢" if status == "COMPLETED" else "🔵" if status == "RUNNING" else "❌" if status == "FAILED" else "⛔"
 
             with st.expander(f"{status_icon} Thread: `{tid}` — File: *{t.get('filename')}* ({status})"):
-                col_info1, col_info2 = st.columns(2)
+                col_info1, col_info2, col_info3 = st.columns([0.35, 0.35, 0.30])
                 with col_info1:
-                    st.write(f"**Drawing Type:** {t.get('drawing_type')}")
-                    st.write(f"**Discipline:** {t.get('discipline')}")
-                    st.write(f"**Created At:** {t.get('created_at')}")
+                    st.write(f"**Diagram Type:** P&ID")
+                    st.write(f"**Discipline:** {t.get('discipline') if t.get('discipline') not in ('Unknown', None, 'GENERIC') else 'Piping & Instrumentation'}")
+                    st.write(f"**Created At:** {t.get('created_at', '')[:19].replace('T', ' ')}")
                 with col_info2:
                     st.write(f"**Status:** {t.get('status')}")
+                    st.write(f"**Duration:** {format_duration(t.get('duration_sec'))}")
                     st.write(f"**Last Step:** {t.get('current_step')}")
-                    st.write(f"**Updated At:** {t.get('updated_at')}")
+                with col_info3:
+                    if st.button("📂 Open in Main Dashboard", key=f"hist_open_{tid}", use_container_width=True):
+                        st.session_state["active_thread_id"] = tid
+                        st.rerun()
 
                 if t.get("error_message"):
                     st.error(f"**Failure Error Message:** {t.get('error_message')}")
@@ -991,12 +904,34 @@ with tab_main_history:
                     st.markdown("**Failure Traceback:**")
                     st.code(t.get("error_traceback"))
 
-                # Thread logs
+                # Thread outputs and results from SQLite
                 full_t = get_thread(tid)
+                if status == "COMPLETED" and full_t and full_t.get("result"):
+                    result_state = full_t["result"]
+                    raw_graph_data = result_state.get("engineering_graph")
+                    hist_graph = None
+                    if raw_graph_data:
+                        if isinstance(raw_graph_data, dict):
+                            hist_graph = UniversalEngineeringGraph(**raw_graph_data)
+                        else:
+                            hist_graph = raw_graph_data
+
+                    # Deliverable Download Section
+                    st.markdown("---")
+                    st.markdown("#### 📥 Download Deliverables (Stored in Database)")
+                    render_download_buttons(tid, t.get("filename", "drawing"), key_prefix=f"hist_dl_{tid}")
+
+                    # On-Screen Entity & Topology View
+                    if hist_graph:
+                        st.markdown("#### 📊 Extracted Output & Relationships (On-Screen View)")
+                        render_graph_output_tables(hist_graph, "PID")
+
+                # Thread logs
                 logs = full_t.get("logs", []) if full_t else []
                 if logs:
-                    st.markdown("**Subprocess Execution Timeline:**")
-                    log_df = pd.DataFrame(logs)[["timestamp", "step_name", "log_level", "message"]]
-                    st.dataframe(log_df, use_container_width=True)
+                    st.markdown("---")
+                    with st.expander("📜 Subprocess Execution Timeline Logs", expanded=False):
+                        log_df = pd.DataFrame(logs)[["timestamp", "step_name", "log_level", "message"]]
+                        st.dataframe(log_df, use_container_width=True)
                 else:
                     st.write("No execution logs recorded.")

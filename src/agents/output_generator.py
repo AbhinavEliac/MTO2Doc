@@ -1,14 +1,139 @@
 import os
 import json
 import logging
+import shutil
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import pandas as pd
 from src.agents.base import BaseAgent
 from src.state import GraphState
+from src.db import save_run_output, get_run_outputs, get_thread
 
 logger = logging.getLogger(__name__)
+
+
+def generate_and_store_deliverables(graph, thread_id: Optional[str] = None) -> Dict[str, str]:
+    """
+    Generates all client deliverables (Excel, JSON Graph, AVEVA XML, COMOS JSON, SPPID CSV, Relationships CSV),
+    saves them to thread-specific and root directories, and persists their binary/text content into SQLite run_outputs.
+    """
+    agent = OutputGeneratorAgent()
+    root_output_dir = os.path.join(os.getcwd(), "outputs")
+    os.makedirs(root_output_dir, exist_ok=True)
+
+    if thread_id:
+        target_dir = os.path.join(root_output_dir, thread_id)
+        os.makedirs(target_dir, exist_ok=True)
+    else:
+        target_dir = root_output_dir
+
+    deliverables_paths = {}
+
+    # 1. Generate Excel Deliverable
+    excel_path = os.path.join(target_dir, "engineering_deliverables.xlsx")
+    agent._generate_excel(graph, excel_path)
+    deliverables_paths["excel"] = excel_path
+
+    # 2. Generate Master JSON Graph Deliverable
+    json_path = os.path.join(target_dir, "master_graph.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(graph.model_dump(), f, indent=2)
+    deliverables_paths["json_graph"] = json_path
+
+    # 3. Generate XML export for AVEVA Diagrams & SP3D
+    aveva_path = os.path.join(target_dir, "aveva_diagrams_export.xml")
+    agent._generate_aveva_xml(graph, aveva_path)
+    deliverables_paths["aveva_xml"] = aveva_path
+
+    # 4. Generate COMOS Hierarchical JSON
+    comos_path = os.path.join(target_dir, "comos_hierarchy_export.json")
+    agent._generate_comos_json(graph, comos_path)
+    deliverables_paths["comos_json"] = comos_path
+
+    # 5. Generate SPPID database table CSVs
+    sppid_path = os.path.join(target_dir, "sppid_import_tables.csv")
+    agent._generate_sppid_csv(graph, sppid_path)
+    deliverables_paths["sppid_csv"] = sppid_path
+
+    # 6. Generate Standalone Relationships CSV
+    rel_csv_path = os.path.join(target_dir, "relationships.csv")
+    agent._generate_relationships_csv(graph, rel_csv_path)
+    deliverables_paths["relationships_csv"] = rel_csv_path
+
+    # Mirror to root output dir for backward compatibility if running with a thread_id
+    if thread_id and target_dir != root_output_dir:
+        for fname in [
+            "engineering_deliverables.xlsx",
+            "master_graph.json",
+            "aveva_diagrams_export.xml",
+            "comos_hierarchy_export.json",
+            "sppid_import_tables.csv",
+            "relationships.csv",
+        ]:
+            src_f = os.path.join(target_dir, fname)
+            dst_f = os.path.join(root_output_dir, fname)
+            if os.path.exists(src_f):
+                try:
+                    shutil.copy2(src_f, dst_f)
+                except Exception:
+                    pass
+
+    # Persist all deliverables directly into SQLite run_outputs
+    if thread_id:
+        try:
+            with open(excel_path, "rb") as f:
+                save_run_output(thread_id, "excel", "engineering_deliverables.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f.read())
+            with open(json_path, "rb") as f:
+                save_run_output(thread_id, "json_graph", "master_graph.json", "application/json", f.read())
+            with open(aveva_path, "rb") as f:
+                save_run_output(thread_id, "aveva_xml", "aveva_diagrams_export.xml", "application/xml", f.read())
+            with open(comos_path, "rb") as f:
+                save_run_output(thread_id, "comos_json", "comos_hierarchy_export.json", "application/json", f.read())
+            with open(sppid_path, "rb") as f:
+                save_run_output(thread_id, "sppid_csv", "sppid_import_tables.csv", "text/csv", f.read())
+            with open(rel_csv_path, "rb") as f:
+                save_run_output(thread_id, "relationships_csv", "relationships.csv", "text/csv", f.read())
+            logger.info(f"Persisted all 6 deliverables for thread '{thread_id}' into SQLite run_outputs.")
+        except Exception as e:
+            logger.warning(f"Failed to persist deliverables to SQLite for thread '{thread_id}': {e}")
+
+    return deliverables_paths
+
+
+def ensure_thread_deliverables_in_db(thread_id: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Ensures deliverables exist in SQLite run_outputs for the given thread_id.
+    If not already in DB, attempts to generate them from the stored engineering_graph in threads.result_json.
+    Returns dict mapping format_type -> {format_type, filename, content_type, data (bytes), file_size, created_at}.
+    """
+    from src.models import UniversalEngineeringGraph
+
+    outputs = get_run_outputs(thread_id)
+    if outputs and "excel" in outputs:
+        return outputs
+
+    # If missing from DB, check if thread result_json contains the graph
+    thread_data = get_thread(thread_id)
+    if not thread_data or not thread_data.get("result"):
+        return outputs
+
+    result = thread_data["result"]
+    raw_graph = result.get("engineering_graph")
+    if not raw_graph:
+        return outputs
+
+    try:
+        if isinstance(raw_graph, dict):
+            graph = UniversalEngineeringGraph(**raw_graph)
+        else:
+            graph = raw_graph
+        generate_and_store_deliverables(graph, thread_id=thread_id)
+        return get_run_outputs(thread_id)
+    except Exception as e:
+        logger.error(f"Error generating on-demand deliverables for thread '{thread_id}': {e}")
+        return outputs
+
 
 class OutputGeneratorAgent(BaseAgent):
     """
@@ -22,43 +147,9 @@ class OutputGeneratorAgent(BaseAgent):
         if not graph:
             raise ValueError("No compiled UniversalEngineeringGraph found in state to generate deliverables.")
             
-        output_dir = os.path.join(os.getcwd(), "outputs")
-        os.makedirs(output_dir, exist_ok=True)
-        
-        deliverables_paths = {}
-        
-        # 1. Generate Excel Deliverable
-        excel_path = os.path.join(output_dir, "engineering_deliverables.xlsx")
-        self._generate_excel(graph, excel_path)
-        deliverables_paths["excel"] = excel_path
-        
-        # 2. Generate Master JSON Graph Deliverable
-        json_path = os.path.join(output_dir, "master_graph.json")
-        with open(json_path, "w") as f:
-            json.dump(graph.model_dump(), f, indent=2)
-        deliverables_paths["json_graph"] = json_path
-        
-        # 3. Generate XML export for AVEVA Diagrams & SP3D
-        aveva_path = os.path.join(output_dir, "aveva_diagrams_export.xml")
-        self._generate_aveva_xml(graph, aveva_path)
-        deliverables_paths["aveva_xml"] = aveva_path
-        
-        # 4. Generate COMOS Hierarchical JSON
-        comos_path = os.path.join(output_dir, "comos_hierarchy_export.json")
-        self._generate_comos_json(graph, comos_path)
-        deliverables_paths["comos_json"] = comos_path
-        
-        # 5. Generate SPPID database table CSVs
-        sppid_path = os.path.join(output_dir, "sppid_import_tables.csv")
-        self._generate_sppid_csv(graph, sppid_path)
-        deliverables_paths["sppid_csv"] = sppid_path
-
-        # 6. Generate Standalone Relationships CSV (source, target, type, confidence, attributes, flag_reason)
-        rel_csv_path = os.path.join(output_dir, "relationships.csv")
-        self._generate_relationships_csv(graph, rel_csv_path)
-        deliverables_paths["relationships_csv"] = rel_csv_path
-
-        logger.info(f"Successfully generated all deliverables inside: '{output_dir}'")
+        thread_id = state.get("thread_id") or state.get("metadata", {}).get("thread_id")
+        deliverables_paths = generate_and_store_deliverables(graph, thread_id=thread_id)
+        logger.info(f"Successfully generated and stored all deliverables for thread: '{thread_id}'")
         
         # Cleanup uploaded file from Google GenAI File API to free up resources
         file_name = state.get("metadata", {}).get("primary_page_name")
