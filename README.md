@@ -13,14 +13,6 @@
 
 ---
 
-## 👤 Author & Contact
-
-- **Author**: Abhinav Gupta
-- **Email**: [abhinavgupta15.ag@gmail.com](mailto:abhinavgupta15.ag@gmail.com)
-- **Repository**: [https://github.com/AbhinavEliac/MTO2Doc](https://github.com/AbhinavEliac/MTO2Doc)
-
----
-
 ## 🗺️ Multi-Agent Workflow Flowsheet
 
 <p align="center">
@@ -397,6 +389,6 @@ pid_project/
 ---
 
 <p align="center">
-  <i>Developed with ❤️ by <b>Abhinav Gupta</b> (abhinavgupta15.ag@gmail.com)</i><br>
+  <i>Developed with ❤️ by <b>Abhinav Gupta</b> (abhinavg.aiindia@gmail.com)</i><br>
   <i>Built with Python, LangGraph, Streamlit, OpenCV, EasyOCR, PaddleOCR, Qwen 3.7 VL, and Google Gemini.</i>
 </p>
