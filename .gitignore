@@ -38,13 +38,20 @@ venv.bak/
 # 4. Storage, Temporary Uploads & Output Deliverables
 # ------------------------------------------------------------------------------
 uploads/
-outputs/
+/outputs/
 rasterized/
 temp/
 tmp/
 runs/
 pid_stuff/
-*.pt
+
+# Training intermediate plots and caches (preserve weights and configs)
+training/outputs/**/*.jpg
+training/outputs/**/*.png
+training/outputs/**/*.cache
+training/outputs/annotations/
+training/outputs/yolo_runs/**/weights/last.pt
+training/outputs/yolo_runs/*_run_*/
 
 
 # ------------------------------------------------------------------------------

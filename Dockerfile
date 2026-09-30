@@ -64,9 +64,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     # Application Paths
     PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH="/app" \
-    # Model Cache Locations
+    # Model Cache & Weights Locations
     TORCH_HOME="/app/models/torch" \
     EASYOCR_MODULE_PATH="/app/models/easyocr" \
+    DEFAULT_YOLO_WEIGHTS="/app/training/outputs/yolo_runs/pid_symbol_detector/weights/best.pt" \
     # Streamlit Headless Configuration
     STREAMLIT_SERVER_PORT=8501 \
     STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
@@ -104,7 +105,8 @@ RUN mkdir -p \
     /app/uploads \
     /app/outputs \
     /app/models/torch \
-    /app/models/easyocr
+    /app/models/easyocr \
+    /app/training/outputs/yolo_runs/pid_symbol_detector/weights
 
 # Create a non-root user for security best practices
 RUN useradd -m -u 1000 -s /bin/bash appuser && \

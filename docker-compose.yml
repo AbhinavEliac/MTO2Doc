@@ -25,6 +25,7 @@ services:
       # Increase upload limit for high-resolution engineering drawings (in MB)
       - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=500
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      - DEFAULT_YOLO_WEIGHTS=/app/training/outputs/yolo_runs/pid_symbol_detector/weights/best.pt
 
     # Allocate 2GB shared memory for PyTorch, EasyOCR, and OpenCV workers
     # (prevents container crashes during multi-threaded image processing)
