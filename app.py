@@ -848,36 +848,34 @@ with tab_main_dashboard:
                             df = pd.DataFrame([r.model_dump() for r in graph.relationships])
                             st.dataframe(df, use_container_width=True)
 
-                # Quality Assurance & Process Log
-                st.markdown("<div class='section-header'>🔍 Quality Assurance & Process Log</div>", unsafe_allow_html=True)
-                col_v1, col_v2 = st.columns(2)
+                # Quality Assurance & Process Log (Consistency Errors & Warnings commented out)
+                # col_v1, col_v2 = st.columns(2)
+                # with col_v1:
+                #     st.subheader("Consistency Errors & Warnings")
+                #     if reports:
+                #         for r in reports:
+                #             is_err = (r.get("severity") == "ERROR")
+                #             icon = "❌" if is_err else "⚠️"
+                #             bg_color = "#FDF2F2" if is_err else "#FEFBF0"
+                #             border_color = "#F05252" if is_err else "#FACA15"
+                #             title_color = "#7F1D1D" if is_err else "#713F12"
+                #             msg_color = "#991B1B" if is_err else "#854D0E"
+                #             st.markdown(f"""
+                #             <div style='background-color: {bg_color}; padding: 12px; border-left: 5px solid {border_color}; border-radius: 6px; margin-bottom: 10px; font-family: sans-serif;'>
+                #                 <strong style='color: {title_color}; font-size: 0.95rem;'>{icon} {r.get('rule_id', 'RULE')} (Target: {r.get('target_tag', 'N/A')})</strong><br/>
+                #                 <span style='font-size: 0.9rem; color: {msg_color}; line-height: 1.4; display: block; margin-top: 4px;'>{r.get('message')}</span>
+                #             </div>
+                #             """, unsafe_allow_html=True)
+                #     else:
+                #         st.success("✓ No validation discrepancies identified.")
 
-                with col_v1:
-                    st.subheader("Consistency Errors & Warnings")
-                    if reports:
-                        for r in reports:
-                            is_err = (r.get("severity") == "ERROR")
-                            icon = "❌" if is_err else "⚠️"
-                            bg_color = "#FDF2F2" if is_err else "#FEFBF0"
-                            border_color = "#F05252" if is_err else "#FACA15"
-                            title_color = "#7F1D1D" if is_err else "#713F12"
-                            msg_color = "#991B1B" if is_err else "#854D0E"
-                            st.markdown(f"""
-                            <div style='background-color: {bg_color}; padding: 12px; border-left: 5px solid {border_color}; border-radius: 6px; margin-bottom: 10px; font-family: sans-serif;'>
-                                <strong style='color: {title_color}; font-size: 0.95rem;'>{icon} {r.get('rule_id', 'RULE')} (Target: {r.get('target_tag', 'N/A')})</strong><br/>
-                                <span style='font-size: 0.9rem; color: {msg_color}; line-height: 1.4; display: block; margin-top: 4px;'>{r.get('message')}</span>
-                            </div>
-                            """, unsafe_allow_html=True)
-                    else:
-                        st.success("✓ No validation discrepancies identified.")
-
-                with col_v2:
-                    st.subheader("Extraction Process History")
-                    st.markdown(f"**Re-extraction Loops:** `{re_runs}` / `{max_retries}`")
-                    st.markdown("**Revision History:**")
-                    for log in revision_history:
-                        action = log.get("action", str(log))
-                        st.markdown(f"- {action}")
+                st.markdown("<div class='section-header'>🔍 Extraction Process Log</div>", unsafe_allow_html=True)
+                st.subheader("Extraction Process History")
+                st.markdown(f"**Re-extraction Loops:** `{re_runs}` / `{max_retries}`")
+                st.markdown("**Revision History:**")
+                for log in revision_history:
+                    action = log.get("action", str(log))
+                    st.markdown(f"- {action}")
 
                 # Export & Download
                 st.markdown("<div class='section-header'>📥 Export & Download</div>", unsafe_allow_html=True)
