@@ -9,6 +9,11 @@
   <img src="https://img.shields.io/badge/ISA--5.1-Native%20Extraction-008080?style=for-the-badge" alt="ISA 5.1" />
   <img src="https://img.shields.io/badge/Accuracy-%3E95%25%20Industrial%20Precision-success?style=for-the-badge" alt="Accuracy" />
   <img src="https://img.shields.io/badge/Author-Abhinav%20Gupta-green?style=for-the-badge" alt="Author" />
+  <a href="mailto:abhinavgupta15.ag@gmail.com"><img src="https://img.shields.io/badge/Email-abhinavgupta15.ag%40gmail.com-blue?style=for-the-badge&logo=gmail&logoColor=white" alt="Email" /></a>
+</p>
+
+<p align="center">
+  <b>Author:</b> Abhinav Gupta &nbsp;|&nbsp; <b>Contact:</b> <a href="mailto:abhinavgupta15.ag@gmail.com">abhinavgupta15.ag@gmail.com</a>
 </p>
 
 ---
@@ -389,6 +394,6 @@ pid_project/
 ---
 
 <p align="center">
-  <i>Developed with ❤️ by <b>Abhinav Gupta</b> (abhinavg.aiindia@gmail.com)</i><br>
+  <i>Developed with ❤️ by <b>Abhinav Gupta</b> (<a href="mailto:abhinavgupta15.ag@gmail.com">abhinavgupta15.ag@gmail.com</a>)</i><br>
   <i>Built with Python, LangGraph, Streamlit, OpenCV, EasyOCR, PaddleOCR, Qwen 3.7 VL, and Google Gemini.</i>
 </p>
