@@ -186,23 +186,37 @@ def trace_lines_and_connections(
                         "rel_type": "INSTALLED_ON"
                     })
 
-    # B. Map Instruments to Piping Lines or Equipment (MONITORS)
+    # B. Map Instruments to Process Lines or Associated Equipment (MEASURES / SIGNALS_TO / INSTALLED_ON)
     for inst in instruments:
         itag = inst.get("tag")
-        if not itag:
+        if not itag or inst.get("is_reference"):
             continue
 
-        # Extract sequence loop number (e.g. 9087 from 26-PIT-9087, 0001 from 27-PIT-0001B)
+        # Extract sequence loop number (e.g. 9055 from 26-PIT-9055)
         loop_match = re.search(r'(\d{3,5})', re.sub(r'^\d{2,3}-', '', itag))
         seq_num = loop_match.group(1) if loop_match else None
         target_entity = None
+        evidence_vec = {"geometry": 0.0, "topology": 0.0, "semantic": 0.0}
 
-        # 1. Exact loop ID match to a piping line
+        # Determine semantic instrument relationship type
+        it_upper = itag.upper()
+        if any(c in it_upper for c in ('XV-', 'MOV-', 'SDV-', 'BDV-')):
+            rel_type = "INSTALLED_ON"
+        elif any(c in it_upper for c in ('PY-', 'TY-', 'FY-', 'LY-')):
+            rel_type = "SIGNALS_TO"
+        elif any(c in it_upper for c in ('PCV-', 'TCV-', 'FCV-', 'LCV-', 'CV-')):
+            rel_type = "CONTROLS"
+        else:
+            rel_type = "MEASURES"
+
+        # 1. Exact loop ID match to a piping line (high semantic confidence)
         if seq_num:
             for litem in line_items:
                 ltag = litem.get("tag", "")
                 if seq_num in ltag:
                     target_entity = ltag
+                    evidence_vec["semantic"] = 0.95
+                    evidence_vec["topology"] = 0.85
                     break
 
         # 2. Extract instrument coordinates
@@ -212,33 +226,28 @@ def trace_lines_and_connections(
 
         # 3. Snap instrument directly to continuous polyline vector traces
         if not target_entity:
-            target_entity = _find_closest_line_segment(ix, iy, traces, line_items, max_dist=0.10)
-
-        # 4. Spatial line tag proximity fallback
-        if not target_entity:
-            target_entity = _find_closest_tag(ix, iy, line_items, max_dist=0.25)
-
-        # 5. Direct equipment nozzle or equipment proximity fallback
-        if not target_entity:
-            target_entity = _find_closest_tag(ix, iy, equipment, max_dist=0.30)
-
-        # 6. Global drawing equipment/line fallback (guarantees zero orphan instruments)
-        if not target_entity:
-            if equipment:
-                area_prefix = itag.split('-')[0] if '-' in itag and itag.split('-')[0].isdigit() else ""
-                same_area_eq = [e.get("tag") for e in equipment if area_prefix and e.get("tag", "").startswith(area_prefix)]
-                target_entity = same_area_eq[0] if same_area_eq else equipment[0].get("tag")
-            elif line_items:
-                target_entity = line_items[0].get("tag")
+            closest_line, dist = _find_closest_line_segment_with_dist(ix, iy, traces, line_items, max_dist=0.08)
+            if closest_line:
+                target_entity = closest_line
+                evidence_vec["geometry"] = round(max(0.40, 1.0 - (dist / 0.08) * 0.5), 2)
+                evidence_vec["topology"] = 0.70
 
         if target_entity:
-            rkey = (itag, target_entity, "MONITORS")
+            geom_c = evidence_vec.get("geometry", 0.0)
+            topo_c = evidence_vec.get("topology", 0.0)
+            sem_c = evidence_vec.get("semantic", 0.0)
+            rel_conf = round(max(0.50, 0.40 * geom_c + 0.30 * topo_c + 0.30 * sem_c), 2)
+
+            rkey = (itag, target_entity, rel_type)
             if rkey not in existing_rels:
                 existing_rels.add(rkey)
                 relations.append({
                     "source_tag": itag,
                     "target_tag": target_entity,
-                    "rel_type": "MONITORS"
+                    "rel_type": rel_type,
+                    "confidence": rel_conf,
+                    "domain": "CONTROL" if rel_type in ("SIGNALS_TO", "CONTROLS") else "PHYSICAL",
+                    "evidence_vector": evidence_vec,
                 })
 
     # C. Map PSVs to Host Piping Lines & Relief Destinations (Eliminates distant equipment false snapping)
@@ -433,11 +442,12 @@ def _dist_to_segment(px: float, py: float, x1: float, y1: float, x2: float, y2: 
     return math.hypot(px - proj_x, py - proj_y)
 
 
-def _find_closest_line_segment(
-    x: float, y: float, traces: List[Dict[str, Any]], line_items: List[Dict[str, Any]], max_dist: float = 0.40
-) -> Optional[str]:
+def _find_closest_line_segment_with_dist(
+    x: float, y: float, traces: List[Dict[str, Any]], line_items: List[Dict[str, Any]], max_dist: float = 0.10
+) -> Tuple[Optional[str], float]:
     """
-    Finds the closest line tag using both physical polyline traces and text centroids.
+    Finds the closest line tag using both physical polyline traces and text centroids,
+    returning the matching tag and the exact minimum distance.
     """
     from src.utils.tag_stitcher import safe_float
 
@@ -451,7 +461,6 @@ def _find_closest_line_segment(
         if not tag or not raw_grid_path:
             continue
 
-        # Flatten nested list structures if needed
         flat_pts: List[Tuple[float, float]] = []
         for elem in raw_grid_path:
             if isinstance(elem, (list, tuple)) and len(elem) >= 2:
@@ -475,9 +484,27 @@ def _find_closest_line_segment(
 
     # Fallback to centroid proximity
     if not best_tag:
-        best_tag = _find_closest_tag(x, y, line_items, max_dist=max_dist)
+        for item in line_items:
+            tag = item.get("tag")
+            if not tag:
+                continue
+            attrs = item.get("attributes") or {}
+            cx = float(attrs.get("pos_x", 0.5)) if attrs.get("pos_x") else 0.5
+            cy = float(attrs.get("pos_y", 0.5)) if attrs.get("pos_y") else 0.5
+            d = math.hypot(x - cx, y - cy)
+            if d < min_dist:
+                min_dist = d
+                best_tag = tag
 
-    return best_tag
+    return best_tag, min_dist
+
+
+def _find_closest_line_segment(
+    x: float, y: float, traces: List[Dict[str, Any]], line_items: List[Dict[str, Any]], max_dist: float = 0.40
+) -> Optional[str]:
+    """Finds the closest line tag using both physical polyline traces and text centroids."""
+    tag, _ = _find_closest_line_segment_with_dist(x, y, traces, line_items, max_dist=max_dist)
+    return tag
 
 
 def _find_closest_tag(

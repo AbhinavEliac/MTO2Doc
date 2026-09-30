@@ -629,19 +629,22 @@ class OutputGeneratorAgent(BaseAgent):
         for gen in getattr(graph, 'generic_components', []):
             rows.append(["GENERIC_COMPONENT", gen.tag or "", gen.classification or "", gen.description or "", "", "", ""])
 
+        for ref in getattr(graph, 'references', []):
+            rows.append(["REFERENCE", ref.referenced_tag or "", ref.reference_type or "", ref.direction or "", ref.source_text or "", "", ""])
+
         # Topological Relationships (Fix Gemini CSV 0% score)
         for rel in getattr(graph, 'relationships', []):
             src_tag = getattr(rel, 'source_tag', getattr(rel, 'source', ''))
             trg_tag = getattr(rel, 'target_tag', getattr(rel, 'target', ''))
             r_type = str(getattr(rel, 'rel_type', getattr(rel, 'type', ''))).upper()
             conf_val = getattr(rel, 'confidence', 1.0)
-            rows.append(["RELATIONSHIP", src_tag, r_type, trg_tag, f"conf={conf_val:.2f}", "", ""])
+            rows.append(["RELATIONSHIP", src_tag, r_type, trg_tag, f"conf={conf_val:.2f}", getattr(rel, 'domain', 'PHYSICAL'), ""])
 
         df = pd.DataFrame(rows)
         df.to_csv(path, index=False, header=False)
 
     def _generate_relationships_csv(self, graph, path: str):
-        """Generates standalone relationships.csv with source, target, type, confidence, attributes, flag_reason."""
+        """Generates standalone relationships.csv with source, target, type, domain, confidence, evidence_vector, attributes, flag_reason."""
         import json
         rows = []
         for rel in getattr(graph, 'relationships', []):
@@ -649,7 +652,9 @@ class OutputGeneratorAgent(BaseAgent):
                 "source": getattr(rel, 'source_tag', getattr(rel, 'source', '')),
                 "target": getattr(rel, 'target_tag', getattr(rel, 'target', '')),
                 "type": str(getattr(rel, 'rel_type', getattr(rel, 'type', ''))).lower(),
+                "domain": getattr(rel, 'domain', 'PHYSICAL'),
                 "confidence": getattr(rel, 'confidence', 1.0),
+                "evidence_vector": json.dumps(getattr(rel, 'evidence_vector', {}) or {}),
                 "attributes": json.dumps(getattr(rel, 'attributes', {}) or {}),
                 "flag_reason": getattr(rel, 'flag_reason', None) or "",
             })

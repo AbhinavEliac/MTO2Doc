@@ -95,6 +95,8 @@ class Relationship(BaseModel):
     target: str = Field(description="Target component tag identifier")
     type: str = Field(description="Type of connection (e.g., 'connects_to', 'measures', 'controls', 'mounted_on')")
     confidence: float = Field(default=1.0, description="Extraction confidence level")
+    domain: str = Field(default="PHYSICAL", description="Relationship domain: PHYSICAL, CONTROL, REFERENCE, ELECTRICAL")
+    evidence_vector: Optional[Dict[str, float]] = Field(default=None, description="Multi-factor evidence confidence scores")
     attributes: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata for the connection")
     flag_reason: Optional[str] = Field(default=None, description="Reason for flagging (e.g., cross_document_contamination, low_confidence)")
 
@@ -109,6 +111,21 @@ class Relationship(BaseModel):
     @property
     def rel_type(self) -> str:
         return self.type.upper()
+
+
+class ReferenceItem(BaseModel):
+    """Represents an external, off-sheet, continuation, or tie-in boundary reference."""
+    reference_id: str = Field(description="Unique reference identifier")
+    referenced_tag: str = Field(description="Referenced tag or destination name (e.g. 27-PIT-0001B, HP FLARE)")
+    reference_type: str = Field(default="EXTERNAL_REFERENCE", description="EXTERNAL_REFERENCE, OFF_SHEET, TIE_IN, BOUNDARY_REFERENCE")
+    source_text: str = Field(default="", description="Original raw text from drawing")
+    context: Optional[str] = Field(default=None, description="Nearby contextual descriptor (e.g. inlet header)")
+    direction: Optional[str] = Field(default=None, description="FROM or TO")
+    source_region: Optional[str] = Field(default=None, description="Drawing region or sheet reference")
+    coordinates: Optional[List[float]] = Field(default=None, description="Bounding box [ymin, xmin, ymax, xmax]")
+    confidence: float = Field(default=1.0, description="Extraction confidence score 0-1")
+    target_entity_id: Optional[str] = Field(default=None, description="Local entity ID if resolvable")
+    external: bool = Field(default=True, description="True if pointing off-sheet or to another drawing/system")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -279,6 +296,12 @@ class UniversalEngineeringGraph(BaseModel):
     annotations: List[AnnotationItem] = Field(
         default_factory=list,
         description="Text annotations, elevation labels, notes from any drawing type"
+    )
+
+    # ── References (Off-sheet / Continuation / Boundaries) ────────────────────
+    references: List[ReferenceItem] = Field(
+        default_factory=list,
+        description="External, off-sheet, continuation, or tie-in boundary references"
     )
 
     # ── Cross-drawing Relationships ──────────────────────────────────────────

@@ -449,6 +449,51 @@ def _is_setpoint_context_spatial(item_idx: int, all_items: List[Dict[str, Any]])
     return False
 
 
+# Operational Reference Context Guard (e.g. FROM 27-PIT-0001B, FROM 26-PIT-9087)
+_REF_MARKER_RE = re.compile(
+    r'\b(?:FROM|TO|REFER|VENDOR|OFF-SKID|BY\s+MAN|BY\s+PIPING|TIE-IN|CONTINUED\s+ON|SEE\s+DWG|REF\s+DWG|INLET\s+HEADER|DISCHARGE\s+HEADER)\b',
+    re.IGNORECASE
+)
+
+
+def _is_reference_context_spatial(item_idx: int, all_items: List[Dict[str, Any]]) -> bool:
+    """
+    Check whether item at item_idx or any adjacent OCR item (within Y-gap 0.04 and X-gap 0.12)
+    contains operational continuation/reference keywords.
+    """
+    target = all_items[item_idx]
+    target_text = (target.get('text') or target.get('value') or '').strip()
+    if _REF_MARKER_RE.search(target_text):
+        return True
+
+    t_y = float(target.get('center_y') or (target.get('attributes') or {}).get('pos_y') or -1)
+    t_x = float(target.get('center_x') or (target.get('attributes') or {}).get('pos_x') or -1)
+
+    if t_y < 0 or t_x < 0:
+        return False
+
+    for i, other in enumerate(all_items):
+        if i == item_idx:
+            continue
+        o_text = (other.get('text') or other.get('value') or '').strip()
+        if not o_text:
+            continue
+        o_y = float(other.get('center_y') or (other.get('attributes') or {}).get('pos_y') or -1)
+        o_x = float(other.get('center_x') or (other.get('attributes') or {}).get('pos_x') or -1)
+        if o_y < 0 or o_x < 0:
+            continue
+
+        dy = abs(t_y - o_y)
+        dx = abs(t_x - o_x)
+
+        if dy <= 0.04 and dx <= 0.12:
+            if _REF_MARKER_RE.search(o_text):
+                return True
+
+    return False
+
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Defect 4 Fix: Line tag grammar enforcement helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -576,6 +621,13 @@ def classify_paddle_results(
     # Pre-pass: stitch fragmented OCR tags and rectify typos
     items = stitch_fragmented_tags(items)
 
+    # Pre-scan explicit reference callouts across all items (e.g. FROM 27-PIT-0001B, FROM 26-PIT-9087)
+    explicit_ref_tags = set()
+    for it in items:
+        it_txt = it.get('text') or it.get('value') or it.get('tag') or ''
+        for m_ref in re.finditer(r'\b(?:FROM|TO)\s+((?:\d{2}-)?[A-Z]{2,4}-\d{3,5}[A-Z]?)', str(it_txt), re.IGNORECASE):
+            explicit_ref_tags.add(m_ref.group(1).upper())
+
     found: Dict[str, Dict] = {}  # tag → item (deduplicated by EXACT tag string)
     dt = (drawing_type or 'PID').upper()
 
@@ -658,8 +710,8 @@ def classify_paddle_results(
                                         flag_reason=flag_reason)
                 item_added = True
 
-        # Check for operational reference context (e.g. FROM ..., TO ..., TIE-IN TO ...)
-        is_ref_context = bool(re.search(r'\b(?:FROM|TO|TIE-IN|CONTINUED\s+ON|SEE\s+DWG|REF\s+DWG)\b', t, re.IGNORECASE))
+        # Check for operational reference context (e.g. FROM ..., TO ...)
+        is_ref_context = bool(re.search(r'^\s*(?:FROM|TO)\s+', t, re.IGNORECASE))
 
         # Split-suffix sibling instrument tags (e.g., 27-PY-0001BA/BB -> 27-PY-0001BA, 27-PY-0001BB)
         for m in re.finditer(r'\b(\d{2}-[A-Z]{2,4}-\d{3,5})([A-Z]{1,2})/([A-Z]{1,2})\b', t, re.IGNORECASE):
@@ -669,9 +721,12 @@ def classify_paddle_results(
             tag1 = f"{base_prefix}{suf1}"
             tag2 = f"{base_prefix}{suf2}"
             for tag in (tag1, tag2):
-                if tag not in found:
+                tag_is_ref = is_ref_context or (tag in explicit_ref_tags)
+                if tag in found and tag_is_ref:
+                    found[tag]["is_reference"] = True
+                elif tag not in found:
                     it_copy = dict(item)
-                    if is_ref_context:
+                    if tag_is_ref:
                         it_copy["is_reference"] = True
                     found[tag] = _make_item(tag, 'INSTRUMENT_TAG', conf, it_copy)
             item_added = True
@@ -681,9 +736,12 @@ def classify_paddle_results(
             seq = m.group(1)
             unit = m.group(2)
             st_tag = f"{unit}-ST-{seq}"
-            if st_tag not in found:
+            tag_is_ref = is_ref_context or (st_tag in explicit_ref_tags)
+            if st_tag in found and tag_is_ref:
+                found[st_tag]["is_reference"] = True
+            elif st_tag not in found:
                 it_copy = dict(item)
-                if is_ref_context:
+                if tag_is_ref:
                     it_copy["is_reference"] = True
                 found[st_tag] = _make_item(st_tag, 'EQUIPMENT_TAG', conf, it_copy)
                 item_added = True
@@ -693,20 +751,29 @@ def classify_paddle_results(
             full_tag = m.group(1).upper()
             code = m.group(2).upper()
             seq = m.group(3)
-            if len(seq) == 6:
-                continue  # Drawing reference number, skip
+            # Only skip if sequence is purely numeric 6-digits (drawing reference number e.g. 26-000001-001)
+            if seq.isdigit() and len(seq) == 6:
+                continue
             # Reject spec codes like GC11S, AS20S embedded in full tag
             if _SPEC_CODE_PATTERN.match(full_tag) or _SERVICE_CODE_PATTERN.match(full_tag):
                 continue
-            if full_tag in found and found[full_tag]['classification'] != 'NOTE':
-                continue
+            tag_is_ref = is_ref_context or (full_tag in explicit_ref_tags)
+            if full_tag in found:
+                if tag_is_ref:
+                    found[full_tag]["is_reference"] = True
+                if found[full_tag]['classification'] != 'NOTE':
+                    continue
 
             _VALVE_FUNCTION_CODES = {
                 'CB', 'GB', 'BL', 'GT', 'BT', 'GL', 'NV', 'BV', 'PL', 'BF', 'CK', 'ND',
                 'HV', 'XV', 'MOV', 'SDV', 'BDV', 'CV', 'PCV', 'TCV', 'FCV', 'LCV', 'ZV', 'EV',
                 'FV', 'PV', 'TV', 'LV', 'AV', 'RV', 'SV', 'DV', 'WV', 'MV', 'BFV', 'PLV', 'PRV'
             }
-            if code in _VALVE_FUNCTION_CODES and len(re.sub(r'\D', '', seq)) >= 3:
+            num_digits = len(re.sub(r'\D', '', seq))
+            if code == 'CK' and num_digits == 3:
+                # 3-digit CK is a Temporary Commissioning Suction Strainer (Equipment)
+                cat = 'EQUIPMENT_TAG'
+            elif code in _VALVE_FUNCTION_CODES and num_digits >= 3:
                 cat = 'VALVE_TAG'
             elif code in _EQUIPMENT_CODES:
                 cat = 'EQUIPMENT_TAG'
@@ -719,7 +786,7 @@ def classify_paddle_results(
 
             if full_tag not in found:
                 it_copy = dict(item)
-                if is_ref_context:
+                if tag_is_ref:
                     it_copy["is_reference"] = True
                 found[full_tag] = _make_item(full_tag, cat, conf, it_copy)
                 item_added = True
@@ -727,15 +794,18 @@ def classify_paddle_results(
         # Bare equipment tags without project prefix (e.g. KA-902, KA-901, CX-9021, CX-9011, HA-911, TK-901, FA-9015)
         for m in _GENERIC_EQUIP_PATTERN.finditer(t):
             full_tag = m.group(1).upper()
-            code_m = re.match(r'^([A-Z]{1,3})', full_tag)
-            code = code_m.group(1) if code_m else ""
+            prefix_m = re.match(r'^([A-Z]+)-', full_tag)
+            code = prefix_m.group(1) if prefix_m else ""
             if (code in _EQUIP_PREFIX_ALLOWLIST
                     and not _EQUIP_REJECT_PATTERN.match(full_tag)
                     and not _SPEC_CODE_PATTERN.match(full_tag)
                     and not _SERVICE_CODE_PATTERN.match(full_tag)):
-                if full_tag not in found:
+                tag_is_ref = is_ref_context or (full_tag in explicit_ref_tags)
+                if full_tag in found and tag_is_ref:
+                    found[full_tag]["is_reference"] = True
+                elif full_tag not in found:
                     it_copy = dict(item)
-                    if is_ref_context:
+                    if tag_is_ref:
                         it_copy["is_reference"] = True
                     found[full_tag] = _make_item(full_tag, 'EQUIPMENT_TAG', conf, it_copy)
                     item_added = True
@@ -743,7 +813,10 @@ def classify_paddle_results(
         # Bare instrument tags — Defect 3: setpoint negative-context guard for 3-digit setpoints
         for m in _BARE_INSTRUMENT_SEARCH.finditer(t):
             tag = m.group(1).upper()
+            tag_is_ref = is_ref_context or (tag in explicit_ref_tags)
             if tag in found:
+                if tag_is_ref:
+                    found[tag]["is_reference"] = True
                 continue
             seq_num = re.sub(r'\D', '', tag)
             is_3digit_setpoint = len(seq_num) == 3
@@ -756,8 +829,11 @@ def classify_paddle_results(
                 logger.debug(f"Setpoint guard: demoted bare setpoint '{tag}' to NOTE")
             else:
                 # Real bare instrument tag (e.g. TIT-9025, PIT-9016)
+                it_copy = dict(item)
+                if tag_is_ref:
+                    it_copy["is_reference"] = True
                 found[tag] = _make_item(
-                    tag, 'INSTRUMENT_TAG', min(conf, 0.85), item
+                    tag, 'INSTRUMENT_TAG', min(conf, 0.85), it_copy
                 )
             item_added = True
 
@@ -894,6 +970,10 @@ def classify_paddle_results(
                 winner_item['alarms'] = merged_alarms
                 winner_item['attributes']['alarms'] = ','.join(merged_alarms)
 
+            # Preserve reference flag
+            if loser_item.get('is_reference'):
+                winner_item['is_reference'] = True
+
             # Preserve coordinates if winner lacks them
             if not winner_item.get('attributes', {}).get('pos_x') and loser_item.get('attributes', {}).get('pos_x'):
                 winner_item['attributes']['pos_x'] = loser_item['attributes']['pos_x']
@@ -985,6 +1065,7 @@ def _make_item(
         'aliases': [],
         'alarms': alarms,
         'sub_component': sub_comp,
+        'is_reference': bool(raw_item.get('is_reference', False)),
     }
 
 

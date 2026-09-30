@@ -30,7 +30,7 @@ from src.models import (
     UniversalEngineeringGraph,
     EquipmentItem, LineItem, InstrumentItem, ValveItem, SafetyReliefValveItem,
     LuminaireItem, PanelItem, CableItem, EarthingItem,
-    GenericComponentItem, AnnotationItem, Relationship,
+    GenericComponentItem, AnnotationItem, Relationship, ReferenceItem,
 )
 from src.state import GraphState
 from src.utils.tag_stitcher import safe_float
@@ -146,19 +146,16 @@ class CompilerAgent(BaseAgent):
             logger.info("Provenance: no OCR token set in state; skipping contamination filter.")
 
         # Universal compilation across all detected entity types
-        graph.equipment = self._compile_equipment(text_elements, symbols)
+        graph.references = self._compile_references(text_elements)
+        graph.equipment = self._compile_equipment(text_elements, symbols, graph.references)
         graph.lines = self._compile_lines(text_elements, geometry, all_relations)
-        graph.instruments = self._compile_instruments(text_elements, symbols, all_relations, graph.lines)
+        graph.instruments = self._compile_instruments(text_elements, symbols, all_relations, graph.lines, graph.references)
         graph.valves = self._compile_valves(text_elements, symbols, all_relations, graph.lines)
         graph.safety_relief_valves = self._compile_safety_relief_valves(text_elements, symbols)
         graph.luminaires = self._compile_luminaires(text_elements, symbols)
         graph.panels = self._compile_panels(text_elements, symbols)
         graph.cables = self._compile_cables(text_elements, symbols, relations)
         graph.earthing_components = self._compile_earthing(text_elements, symbols)
-        graph.generic_components = self._compile_generic(text_elements, symbols)
-
-        # Always compile annotations (notes, elevations, ratings)
-        graph.annotations = self._compile_annotations(text_elements)
 
         # Defect 2 Fix: Build master tag alias lookup map across all compiled entities
         from src.utils.tag_classifier import canonicalize_tag
@@ -189,42 +186,17 @@ class CompilerAgent(BaseAgent):
             _register(l.tag, getattr(l, 'aliases', None))
         for psv in graph.safety_relief_valves:
             _register(psv.tag, getattr(psv, 'aliases', None))
+        for ref in graph.references:
+            _register(ref.referenced_tag)
+
+        # Deduplicate and resolve generic components against existing canonical entities
+        graph.generic_components = self._compile_generic(text_elements, symbols, tag_alias_map)
+
+        # Always compile annotations (notes, elevations, ratings)
+        graph.annotations = self._compile_annotations(text_elements)
 
         # Always compile relationships (cross-type) using master tag alias lookup
         graph.relationships = self._compile_relationships(all_relations, tag_alias_map)
-
-        # Guarantee zero orphan instruments in the engineering graph
-        rel_tags = set()
-        for r in graph.relationships:
-            rel_tags.add(r.source)
-            rel_tags.add(r.target)
-            rel_tags.add(canonicalize_tag(r.source))
-            rel_tags.add(canonicalize_tag(r.target))
-
-        for inst in graph.instruments:
-            if inst.tag not in rel_tags and canonicalize_tag(inst.tag) not in rel_tags:
-                best_target = None
-                loop_match = re.search(r'(\d{3,5})', inst.tag)
-                seq = loop_match.group(1) if loop_match else None
-                if seq:
-                    for l in graph.lines:
-                        if seq in l.tag or (getattr(l, 'sequence_number', None) and seq == l.sequence_number):
-                            best_target = l.tag
-                            break
-                if not best_target and graph.lines:
-                    best_target = graph.lines[0].tag
-                elif not best_target and graph.equipment:
-                    best_target = graph.equipment[0].tag
-
-                if best_target:
-                    graph.relationships.append(Relationship(
-                        source=inst.tag,
-                        target=best_target,
-                        type="monitors",
-                        confidence=0.85,
-                        attributes={"inferred": True},
-                    ))
-                    rel_tags.add(inst.tag)
 
         total = graph.total_items
         logger.info(
@@ -273,29 +245,44 @@ class CompilerAgent(BaseAgent):
         'MA': 'Machinery', 'MB': 'Machinery', 'ME': 'Mechanical Equipment',
     }
 
-    def _compile_equipment(self, texts: List[Dict], symbols: List[Dict]) -> List[EquipmentItem]:
+    def _compile_equipment(
+        self, texts: List[Dict], symbols: List[Dict],
+        references: Optional[List[ReferenceItem]] = None,
+    ) -> List[EquipmentItem]:
+        from src.utils.tag_classifier import canonicalize_tag
         self._ISA_EQUIP_DESC['CK'] = 'Suction Strainer'
         compiled = []
         seen_equip: dict = {}  # canonical key → EquipmentItem (deduplication)
+        ref_keys = set()
+        if references:
+            for r in references:
+                ref_keys.add(r.referenced_tag.upper())
+                ref_keys.add(canonicalize_tag(r.referenced_tag))
+
         eq_tags = [
             t for t in texts
-            if t.get("classification") == "EQUIPMENT_TAG"
-            or (t.get("classification") == "VALVE_TAG" and re.search(r'^(?:26-)?CK-911\b', t.get("tag", "").upper()))
+            if (t.get("classification") == "EQUIPMENT_TAG"
+                or (t.get("classification") == "VALVE_TAG" and re.search(r'^(?:\d{2,3}-)?CK-\d{3}\b', t.get("tag", "").upper())))
+            and not t.get("is_reference")
+            and not re.search(r'\b(?:FROM|TO|REFER|VENDOR|OFF-SKID)\b', t.get("value", ""), re.IGNORECASE)
         ]
         for eq in eq_tags:
             tag = eq["tag"].strip()
             tag_upper = tag.upper()
+            if tag_upper in ref_keys or canonicalize_tag(tag) in ref_keys:
+                continue
 
             # 1. Skip multi-segment piping lines that matched equipment allowlist (e.g. VA-26-9119-AS20S-00)
             if re.match(r'^[A-Z]{2,4}-\d{2,4}-\d{3,5}-[A-Z0-9]+', tag_upper):
                 continue
-            # 2. Skip work pack notes, test points, line references, or drawing coordinates
-            if tag_upper.startswith(('WP-', 'TP-', 'RD-', 'SP-', 'P-26-', 'U-9757', '43-TP-', 'P-')):
+            # 2. Skip work pack notes, test points, line references, drawing numbers, or stage note strings
+            if (tag_upper.startswith(('WP-', 'TP-', 'RD-', 'SP-', 'P-26-', 'U-9757', '43-TP-', 'P-', 'STAGE-')) or
+                '000001' in tag_upper or '900001' in tag_upper):
                 continue
 
             # 3. Strip concatenated equipment parameter and rating suffixes (e.g. 26-KA-901-STAGE -> 26-KA-901)
             clean_tag = tag
-            m_suf = re.search(r'-(?:STAGE\d?|HP|LP|DUTY|STANDBY|150|300|600|2)$', tag, re.IGNORECASE)
+            m_suf = re.search(r'-(?:STAGE\d?|GAS|OIL|HP|LP|DUTY|STANDBY|150|300|600|900|1500|2500|\d)$', tag, re.IGNORECASE)
             if m_suf and not re.search(r'-(?:M\d{2}|C0\d)$', tag):
                 clean_tag = tag[:m_suf.start()]
                 canon_key = re.sub(r'^\d{2,3}-', '', clean_tag.upper())
@@ -352,7 +339,7 @@ class CompilerAgent(BaseAgent):
             if len(eq_code) < 2 and eq_code != 'R':
                 continue
             eq_type = self._ISA_EQUIP_DESC.get(eq_code, "Generic Equipment")
-            if eq_code == 'CK' or canon_key == 'CK-911':
+            if eq_code == 'CK' or canon_key.startswith('CK-'):
                 eq_type = "Suction Strainer"
 
             # Detect Motor Drivers (e.g. 26-KA-901-M01)
@@ -409,20 +396,23 @@ class CompilerAgent(BaseAgent):
         # Anti-hallucination & Schema Validation Tokens
         INVALID_LINE_TOKENS = {
             'NOTE', 'TIT', 'PIT', 'LIT', 'FIT', 'PDI', 'PDT', 'PT', 'TT', 'FT', 'LT',
-            'REV', 'DWG', 'SHT', 'DETAIL', 'TYP', 'EL', 'M01', 'M02', 'M03', 'MOTOR'
+            'REV', 'DWG', 'SHT', 'DETAIL', 'TYP', 'EL', 'M01', 'M02', 'M03', 'MOTOR',
+            'DSS', 'MECHANIC', 'MECHANICAL', 'STAGE'
         }
 
         for lt in line_tags:
             tag = lt["tag"]
+            if lt.get("is_reference"):
+                continue
 
             # ── Pre-Export Schema Validator & Anti-Hallucination Filter ────────
             # 1. Reject motor tags, electrical cables, work packs, test points, specs, or references
             tag_upper = tag.upper()
             if (re.search(r'-(?:M\d{2}|C0\d)$', tag_upper) or 
-                tag_upper.startswith(('TT-', 'PT-', 'LT-', 'FT-', 'TIT-', 'PIT-', 'LIT-', 'FIT-', 'WP-', 'TP-', 'RD-', 'SP-', 'LO-', 'S-2500', 'CK-911', 'CC-', 'DIFI-', 'FI-', 'PI-', 'PSE-', 'ZSC-', '46-LTCS'))):
+                tag_upper.startswith(('TT-', 'PT-', 'LT-', 'FT-', 'TIT-', 'PIT-', 'LIT-', 'FIT-', 'WP-', 'TP-', 'RD-', 'SP-', 'LO-', 'S-2500', 'CK-911', 'CK-921', 'CC-', 'DIFI-', 'FI-', 'PI-', 'PSE-', 'ZSC-', '46-LTCS', 'DSS-', 'S-9003', 'FROM', 'TO'))):
                 continue
 
-            if any(k in tag_upper for k in ('NOTE', 'DELETED', 'CONSTRUC', 'HIGH2', 'RUPTURE', 'PURGE', 'FLOW-OVER', 'PITTIT')):
+            if any(k in tag_upper for k in ('NOTE', 'DELETED', 'CONSTRUC', 'HIGH2', 'RUPTURE', 'PURGE', 'FLOW-OVER', 'PITTIT', 'MECHANIC', '000001', '900001')):
                 continue
 
             # Require standard piping line sequence format (must have 3-5 digit sequence number)
@@ -652,24 +642,37 @@ class CompilerAgent(BaseAgent):
 
     def _compile_instruments(
         self, texts: List[Dict], symbols: List[Dict],
-        relations: List[Dict], lines: List[LineItem]
+        relations: List[Dict], lines: List[LineItem],
+        references: Optional[List[ReferenceItem]] = None,
     ) -> List[InstrumentItem]:
         from src.utils.tag_stitcher import safe_float
+        from src.utils.tag_classifier import canonicalize_tag
         compiled = []
         seen_loops: Dict[str, InstrumentItem] = {}  # loop_key -> InstrumentItem
+
+        ref_keys = set()
+        if references:
+            for r in references:
+                ref_keys.add(r.referenced_tag.upper())
+                ref_keys.add(self._canonical_inst_key(r.referenced_tag))
+                ref_keys.add(canonicalize_tag(r.referenced_tag))
 
         # Instrument tags from classifier, plus actuated on-off valve loops (XV, MOV, SDV, BDV)
         inst_tags = [
             t for t in texts
-            if t.get("classification") == "INSTRUMENT_TAG"
-            or (t.get("classification") == "VALVE_TAG" and re.search(r'^(?:\d{2,3}-)?(?:XV|MOV|SDV|BDV)-', t.get("tag", "").upper()))
+            if (t.get("classification") == "INSTRUMENT_TAG"
+                or (t.get("classification") == "VALVE_TAG" and re.search(r'^(?:\d{2,3}-)?(?:XV|MOV|SDV|BDV)-', t.get("tag", "").upper())))
+            and not t.get("is_reference")
+            and not re.search(r'\b(?:FROM|TO|REFER|VENDOR|OFF-SKID)\b', t.get("value", ""), re.IGNORECASE)
         ]
 
         for inst in inst_tags:
             tag = inst["tag"].strip()
             tag_upper = tag.upper()
 
-            # 1. Reject non-instruments: Piping lines, material notes, and drawing annotations
+            # 1. Reject non-instruments: Piping lines, material notes, drawing annotations, or reference markers
+            if tag_upper.startswith(('FROM', 'TO', 'REFER', 'STAGE-')) or '000001' in tag_upper or '900001' in tag_upper:
+                continue
             if re.search(r'^(?:AI|GI|N2|FG|IA|PA|DG|VG|FL|DR)-\d+', tag_upper):
                 continue
             if any(k in tag_upper for k in ['LTCS', 'FLOW-OVER-FLOW', 'MCC-', 'AT-8']):
@@ -685,6 +688,14 @@ class CompilerAgent(BaseAgent):
             cleaned = re.sub(r'-(?:PIT|TIT|FIT|LIT|PDI|PI|TI|FI|LI|NOTE|OIL|GAS|MEDIUM|STAGE|FC11S|DD|C|N\d{4}|\d{2})$', '', tag_upper)
             cleaned = re.sub(r'-(?:PIT|TIT|FIT|LIT|PDI|PI|TI|FI|LI)$', '', cleaned)
 
+            if (self._canonical_inst_key(cleaned) in ref_keys or
+                canonicalize_tag(cleaned) in ref_keys or
+                cleaned in ref_keys or
+                self._canonical_inst_key(tag) in ref_keys or
+                canonicalize_tag(tag) in ref_keys or
+                tag_upper in ref_keys):
+                continue
+
             area = '26'
             m_area = re.match(r'^(\d{2,3})-(.*)$', cleaned)
             if m_area:
@@ -693,7 +704,7 @@ class CompilerAgent(BaseAgent):
             else:
                 core = cleaned
 
-            m = re.match(r'^([A-Z]{2,5})-?(\d{3,5})([A-Z])?$', core)
+            m = re.match(r'^([A-Z]{2,5})-?(\d{3,5})([A-Z]{1,2})?$', core)
             if not m:
                 continue
 
@@ -717,8 +728,8 @@ class CompilerAgent(BaseAgent):
                 p_score = 15
 
             # ISA Loop Key Formulation
-            if fcode in ('FE', 'RO', 'FO') or (fcode == 'FI' and seq in ('9056', '9757')):
-                loop_key = f"{area}_FE_{seq}"
+            if fcode in ('FE', 'RO', 'FO', 'FI', 'FT', 'FIT'):
+                loop_key = f"{area}_LOOP_F_{seq}"
             elif fcode == 'FI' and seq == '9211':
                 # OCR misread of TI-9211 on temperature loop 9211
                 loop_key = f"{area}_LOOP_T_{seq}"
@@ -1355,28 +1366,145 @@ class CompilerAgent(BaseAgent):
 
     # ── Generic / Annotation Compilers ────────────────────────────────────────
 
-    def _compile_generic(self, texts: List[Dict], symbols: List[Dict]) -> List[GenericComponentItem]:
+    def _compile_generic(
+        self, texts: List[Dict], symbols: List[Dict], tag_alias_map: Optional[Dict[str, str]] = None
+    ) -> List[GenericComponentItem]:
         compiled = []
-        # Anything with a tag that isn't already handled by a specific compiler
+        tag_alias_map = tag_alias_map or {}
+        from src.utils.tag_classifier import canonicalize_tag
+
+        # Only true generic tags that are not references and not notes/drawings
         generic_items = [
             t for t in texts
-            if t["classification"] in ('EQUIPMENT_TAG', 'GENERIC_TAG')
+            if t.get("classification") == 'GENERIC_TAG'
+            and not t.get("is_reference")
         ]
 
+        seen_gen = set()
         for item in generic_items:
+            raw_tag = item.get("tag", "").strip()
+            if not raw_tag or len(raw_tag) < 3:
+                continue
+
+            tag_upper = raw_tag.upper()
+            canon_tag = canonicalize_tag(raw_tag)
+            clean_alnum = re.sub(r'[^A-Z0-9]', '', tag_upper)
+
+            # Skip drawing numbers, notes, stage labels
+            if any(k in tag_upper for k in ('000001', '900001', 'STAGE', 'NOTE', 'DWG')):
+                continue
+
+            # Attempt resolution against canonical entity registry
+            matched_canonical = (
+                tag_alias_map.get(tag_upper)
+                or tag_alias_map.get(canon_tag)
+                or tag_alias_map.get(clean_alnum)
+            )
+
+            # Strip variant suffixes (e.g. -STAGE, -GAS, -2500, -OIL) to check base tag
+            if not matched_canonical:
+                m_base = re.sub(r'-(?:STAGE\d?|GAS|OIL|HP|LP|DUTY|STANDBY|150|300|600|900|1500|2500|\d)$', '', tag_upper)
+                if m_base != tag_upper:
+                    matched_canonical = (
+                        tag_alias_map.get(m_base)
+                        or tag_alias_map.get(canonicalize_tag(m_base))
+                        or tag_alias_map.get(re.sub(r'[^A-Z0-9]', '', m_base))
+                    )
+
+            if matched_canonical:
+                # Merge into existing canonical entity
+                self._record_merge(
+                    canonical_tag=matched_canonical,
+                    merged_tag=raw_tag,
+                    merge_reason="GENERIC_COMPONENT_RESOLVED_TO_CANONICAL",
+                    entity_type="GENERIC_COMPONENT",
+                )
+                continue
+
+            if canon_tag in seen_gen:
+                continue
+            seen_gen.add(canon_tag)
+
             coords = None
             for sym in symbols:
-                if sym.get("inferred_tag") == item["tag"]:
+                if sym.get("inferred_tag") in (raw_tag, canon_tag):
                     coords = [sym["ymin"], sym["xmin"], sym["ymax"], sym["xmax"]]
                     break
 
             compiled.append(GenericComponentItem(
-                tag=item["tag"],
+                tag=raw_tag,
                 classification=item["classification"],
                 description=item.get("value"),
                 attributes=item.get("attributes"),
                 coordinates=coords,
             ))
+        return compiled
+
+    def _compile_references(self, texts: List[Dict]) -> List[ReferenceItem]:
+        """Compile external, off-sheet, continuation, and tie-in boundary references."""
+        compiled = []
+        seen_refs = set()
+        from src.utils.tag_classifier import canonicalize_tag
+
+        for t in texts:
+            val = str(t.get("value") or t.get("text") or "").strip()
+            tag = str(t.get("tag") or val).strip()
+            is_ref = t.get("is_reference", False)
+
+            # Check explicit continuation / tie-in markers
+            m_dir = re.search(r'\b(FROM|TO|TIE-IN\s+TO|CONTINUED\s+ON)\b\s*([A-Z0-9\s\-_/.]+)', val, re.IGNORECASE)
+            is_callout = bool(re.search(r'\b(?:HP\s+FLARE|LP\s+FLARE|CLOSED\s+DRAIN|OPEN\s+DRAIN|HAZ\.\s+OPEN\s+DRAIN|ATMOSPHERE|SUCTION\s+SCRUBBER)\b', val, re.IGNORECASE))
+
+            if not is_ref and not m_dir and not is_callout:
+                continue
+
+            direction = "FROM" if re.search(r'\bFROM\b', val, re.IGNORECASE) else ("TO" if re.search(r'\bTO\b', val, re.IGNORECASE) else None)
+
+            ref_tag = tag
+            context_desc = None
+            if m_dir:
+                captured = m_dir.group(2).strip()
+                # Check if captured text contains an embedded equipment/instrument tag (e.g. 26-PIT-9087)
+                m_sub = re.search(r'((?:\d{2}-)?[A-Z]{2,4}-\d{3,5}[A-Z]?)', captured)
+                if m_sub:
+                    ref_tag = m_sub.group(1)
+                    context_desc = captured.replace(ref_tag, '').strip()
+                else:
+                    ref_tag = captured.split('\n')[0].strip()
+            elif is_callout:
+                m_sink = re.search(r'\b(HP\s+FLARE|LP\s+FLARE|CLOSED\s+DRAIN|OPEN\s+DRAIN|HAZ\.\s+OPEN\s+DRAIN|ATMOSPHERE|SUCTION\s+SCRUBBER)\b', val, re.IGNORECASE)
+                if m_sink:
+                    ref_tag = m_sink.group(1).upper()
+
+            # Clean and validate reference tag
+            ref_tag = re.sub(r'^(?:FROM|TO)\s+', '', ref_tag, flags=re.IGNORECASE).strip()
+            if not ref_tag or len(ref_tag) < 3 or ref_tag.upper() in ('THE', 'AND', 'FOR', 'WITH', 'STAGE'):
+                continue
+
+            clean_ref_key = canonicalize_tag(ref_tag)
+            if clean_ref_key in seen_refs:
+                continue
+            seen_refs.add(clean_ref_key)
+
+            attrs = t.get("attributes") or {}
+            coords = None
+            if attrs.get("pos_x") and attrs.get("pos_y"):
+                px, py = float(attrs["pos_x"]), float(attrs["pos_y"])
+                coords = [max(0.0, py - 0.02), max(0.0, px - 0.05), min(1.0, py + 0.02), min(1.0, px + 0.05)]
+
+            compiled.append(ReferenceItem(
+                reference_id=f"REF-{uuid.uuid4().hex[:8].upper()}",
+                referenced_tag=ref_tag,
+                reference_type="OFF_SHEET" if direction in ("FROM", "TO") else "EXTERNAL_REFERENCE",
+                source_text=val,
+                context=context_desc if context_desc else None,
+                direction=direction,
+                source_region=t.get("region"),
+                coordinates=coords,
+                confidence=float(t.get("confidence", 0.90)),
+                external=True,
+            ))
+
         return compiled
 
     def _compile_annotations(self, texts: List[Dict]) -> List[AnnotationItem]:
@@ -1402,7 +1530,7 @@ class CompilerAgent(BaseAgent):
     def _compile_relationships(
         self, relations: List[Dict], tag_alias_map: Optional[Dict[str, str]] = None
     ) -> List[Relationship]:
-        """Compile relationships with canonical tag mapping and self-loop edge filtering."""
+        """Compile relationships with canonical tag mapping, domain classification, and self-loop edge filtering."""
         from src.utils.tag_classifier import canonicalize_tag
         tag_alias_map = tag_alias_map or {}
         seen_edges: set = set()
@@ -1417,7 +1545,7 @@ class CompilerAgent(BaseAgent):
             if not raw_src or not raw_tgt:
                 continue
 
-            # Defect 2 & Section 32 Fix: Resolve source & target strictly to canonical entity tags
+            # Resolve source & target strictly to canonical entity tags
             src = (
                 tag_alias_map.get(raw_src.upper())
                 or tag_alias_map.get(canonicalize_tag(raw_src))
@@ -1429,14 +1557,12 @@ class CompilerAgent(BaseAgent):
                 or tag_alias_map.get(re.sub(r'[^A-Z0-9]', '', raw_tgt.upper()))
             )
 
-            # Section 32: Drop unresolvable edges connecting to raw OCR fragments or non-existent keys
+            # Drop unresolvable edges connecting to raw OCR fragments or non-existent keys
             if not src or not tgt:
-                logger.debug(f"Relationships: dropped unresolvable edge '{raw_src}' -> '{raw_tgt}'")
                 continue
 
-            # Drop self-loop edges (e.g. 26-CK-921 -> 26-CK-921)
+            # Drop self-loop edges
             if src == tgt or canonicalize_tag(src) == canonicalize_tag(tgt):
-                logger.debug(f"Relationships: dropped self-loop edge '{src}' -> '{tgt}'")
                 continue
 
             canon_edge = (canonicalize_tag(src), canonicalize_tag(tgt), rtype)
@@ -1444,11 +1570,32 @@ class CompilerAgent(BaseAgent):
                 continue
             seen_edges.add(canon_edge)
 
+            # Determine relationship domain
+            domain = r.get("domain")
+            if not domain:
+                if rtype in ("measures", "controls", "actuates", "signals_to"):
+                    domain = "CONTROL"
+                elif rtype in ("references", "from", "to", "external_reference"):
+                    domain = "REFERENCE"
+                elif rtype in ("feeds", "earthed_to"):
+                    domain = "ELECTRICAL"
+                else:
+                    domain = "PHYSICAL"
+
+            evidence_vec = r.get("evidence_vector") or {
+                "geometry": 0.85,
+                "topology": 0.85,
+                "semantic": 0.85,
+            }
+            conf_val = float(r.get("confidence", 0.90))
+
             result.append(Relationship(
                 source=src,
                 target=tgt,
                 type=rtype,
-                confidence=float(r.get("confidence", 1.0)),
+                confidence=conf_val,
+                domain=domain,
+                evidence_vector=evidence_vec,
                 attributes=r.get("attributes") or {},
                 flag_reason=flag,
             ))

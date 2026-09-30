@@ -343,8 +343,10 @@ def stitch_symbol_bubbles(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         cx1 = float(it1.get('center_x', 0))
         cy1 = float(it1.get('center_y', 0))
 
-        # Skip long notes / descriptions
-        if len(t1) > 16 or any(w in t1.upper() for w in ['NOTE', 'PLEASE', 'TOLERANCE', 'DRAWING', 'VALVES', 'CLOSED VESSEL', 'TEMPERATURE', 'ALL FIXTURES']):
+        # Skip long notes / descriptions / drawing references / continuation callouts or multi-numbers
+        _BUBBLE_EXCLUDE_WORDS = {'NOTE', 'PLEASE', 'TOLERANCE', 'DRAWING', 'DWG', 'VALVES', 'CLOSED VESSEL', 'TEMPERATURE', 'ALL FIXTURES', 'STAGE', 'HEADER', 'INLET', 'OUTLET', 'COMPRESSOR', 'FROM', 'TO', 'REFER'}
+        if (len(t1) > 16 or any(w in t1.upper() for w in _BUBBLE_EXCLUDE_WORDS) or
+            re.search(r'\d{5,}', t1) or re.search(r'\d{3,}\s+\d{3,}', t1)):
             continue
 
         # Look for tokens vertically stacked with i (same X column within 0.015, Y gap within 0.038)
@@ -355,7 +357,8 @@ def stitch_symbol_bubbles(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 continue
             it2 = sorted_items[j]
             t2 = str(it2.get('text', '')).strip()
-            if len(t2) > 16 or any(w in t2.upper() for w in ['NOTE', 'PLEASE', 'TOLERANCE', 'DRAWING']):
+            if (len(t2) > 16 or any(w in t2.upper() for w in _BUBBLE_EXCLUDE_WORDS) or
+                re.search(r'\d{5,}', t2) or re.search(r'\d{3,}\s+\d{3,}', t2)):
                 continue
             cx2 = float(it2.get('center_x', 0))
             cy2 = float(it2.get('center_y', 0))
