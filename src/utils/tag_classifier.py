@@ -198,7 +198,7 @@ _LINE_SEARCH = re.compile(
     r'((?:\d+(?:[/\.]\d+)?(?:["\']|mm|DN)\s*[-–\s\.]?\s*)[A-Z]{1,4}\s*[-–\s\.]\s*(?:\d{2,4}\s*[-–\s\.]\s*)?\d{3,5}'
     r'(?:\s*[-–\s\.]\s*[A-Z0-9]{2,8}(?:\s*[-–\s\.]\s*[A-Z0-9]{1,8})?)?'
     r'|'
-    r'[A-Z]{1,4}\s*[-–\s\.]\s*(?:\d{2,4}\s*[-–\s\.]\s*)?\d{3,5}'
+    r'[A-Z]{2,4}\s*[-–\s\.]\s*(?:\d{2,4}\s*[-–\s\.]\s*)?\d{3,5}'
     r'\s*[-–\s\.]\s*[A-Z0-9]{2,8}(?:\s*[-–\s\.]\s*[A-Z0-9]{1,8})?)',
     re.IGNORECASE
 )
@@ -527,7 +527,9 @@ def _validate_line_tag_size(tag: str) -> tuple:
     p0 = parts[0].strip()
     # Check if there is a size token at all
     if not re.match(r'^[\d/]', p0):
-        return True, None  # No size prefix — that's OK
+        if len(p0) < 2 or p0.upper() in {'PSI', 'PSIG', 'BAR', 'BARG', 'KPA', 'KPAG', 'MPA'}:
+            return False, f'invalid_service_code({p0})'
+        return True, None  # No size prefix — valid multi-letter service code
     has_inch = '"' in p0 or "'" in p0
     # Strip inch mark and whitespace for comparison
     size_clean = p0.replace('"', '').replace("'", '').replace(' ', '').lower()
@@ -683,6 +685,14 @@ def classify_paddle_results(
                 svc_code = parts[1] if has_explicit_size and len(parts) >= 2 else parts[0]
                 if svc_code in _KNOWN_VALVE_PREFIXES:
                     continue
+                # Guard against non-size fragments with malformed service code
+                if not has_explicit_size:
+                    if len(parts[0]) < 2:
+                        continue
+                    if parts[0] in {'PSI', 'PSIG', 'BAR', 'BARG', 'KPA', 'KPAG', 'MPA'}:
+                        continue
+                    if parts[0] in {'PDI', 'PDIT', 'PIT', 'TIT', 'FIT', 'LIT', 'PSV', 'PI', 'TI', 'FI', 'LI', 'TE', 'PT', 'TT'}:
+                        continue
 
             flag_reason = None
             tag_conf = conf

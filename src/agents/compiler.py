@@ -150,7 +150,7 @@ class CompilerAgent(BaseAgent):
         graph.equipment = self._compile_equipment(text_elements, symbols, graph.references)
         graph.lines = self._compile_lines(text_elements, geometry, all_relations)
         graph.instruments = self._compile_instruments(text_elements, symbols, all_relations, graph.lines, graph.references)
-        graph.valves = self._compile_valves(text_elements, symbols, all_relations, graph.lines)
+        graph.valves = self._compile_valves(text_elements, symbols, all_relations, graph.lines, existing_equipment=graph.equipment)
         graph.safety_relief_valves = self._compile_safety_relief_valves(text_elements, symbols)
         graph.luminaires = self._compile_luminaires(text_elements, symbols)
         graph.panels = self._compile_panels(text_elements, symbols)
@@ -493,13 +493,27 @@ class CompilerAgent(BaseAgent):
                 spec = rem[3]
                 insulation = rem[4]
 
-            # 2. Reject if service or spec was force-fitted with descriptive/note tokens or instrument function codes
+            # 2. Reject if service or spec was force-fitted with descriptive/note tokens, pressure units, alarms, or instrument codes
             _INST_CODES = {'PDIT', 'FE', 'TW', 'PIT', 'TIT', 'LIT', 'FIT', 'PSV', 'PDI', 'PI', 'TI', 'FI', 'LI', 'TE', 'PT', 'TT', 'LT', 'FT'}
-            if service.upper() in _INST_CODES or service.upper() in INVALID_LINE_TOKENS or spec.upper() in INVALID_LINE_TOKENS:
+            _PRESSURE_UNITS = {'PSI', 'PSIG', 'BAR', 'BARG', 'KPA', 'KPAG', 'MPA'}
+            if (service.upper() in _INST_CODES or service.upper() in _PRESSURE_UNITS or
+                service.upper() in INVALID_LINE_TOKENS or spec.upper() in INVALID_LINE_TOKENS):
                 continue
 
-            # 3. Reject if service code is not a clean alphabetic fluid/system descriptor
-            if not re.match(r'^[A-Z]{1,4}$', service.upper()):
+            # If no size prefix, service code must be a standard multi-letter fluid code (>= 2 chars) and not equipment
+            if not is_size:
+                if len(service) < 2:
+                    continue
+                _EQUIP_NON_LINE = {'CX', 'KA', 'HA', 'TK', 'KO', 'DA', 'PU', 'SK', 'PK', 'ME', 'MA', 'MB', 'HE', 'EA', 'EB', 'CK'}
+                if service.upper() in _EQUIP_NON_LINE:
+                    continue
+
+            # Reject if service code is not a clean alphabetic fluid/system descriptor
+            if not re.match(r'^[A-Z]{2,4}$' if not is_size else r'^[A-Z]{1,4}$', service.upper()):
+                continue
+
+            # Reject if spec is numeric rating, contains valve tags, or is alarm state
+            if spec.isdigit() or re.search(r'(?:BL|GB|GT|CB|CK|NV|BV)\d{3,4}', spec.upper()) or spec.upper() in ('HH', 'LL', 'SD', 'H', 'L'):
                 continue
 
             path_coords = None
@@ -688,12 +702,17 @@ class CompilerAgent(BaseAgent):
             cleaned = re.sub(r'-(?:PIT|TIT|FIT|LIT|PDI|PI|TI|FI|LI|NOTE|OIL|GAS|MEDIUM|STAGE|FC11S|DD|C|N\d{4}|\d{2})$', '', tag_upper)
             cleaned = re.sub(r'-(?:PIT|TIT|FIT|LIT|PDI|PI|TI|FI|LI)$', '', cleaned)
 
-            if (self._canonical_inst_key(cleaned) in ref_keys or
+            # Local graphical evidence takes precedence over external reference context
+            has_local_symbol = any(sym.get("inferred_tag") in (tag, tag_upper, cleaned) for sym in symbols) or inst.get("is_symbol_bubble", False)
+            is_ref = (
+                self._canonical_inst_key(cleaned) in ref_keys or
                 canonicalize_tag(cleaned) in ref_keys or
                 cleaned in ref_keys or
                 self._canonical_inst_key(tag) in ref_keys or
                 canonicalize_tag(tag) in ref_keys or
-                tag_upper in ref_keys):
+                tag_upper in ref_keys
+            )
+            if is_ref and not has_local_symbol:
                 continue
 
             area = '26'
@@ -729,19 +748,16 @@ class CompilerAgent(BaseAgent):
 
             # ISA Loop Key Formulation
             if fcode in ('FE', 'RO', 'FO', 'FI', 'FT', 'FIT'):
-                loop_key = f"{area}_LOOP_F_{seq}"
-            elif fcode == 'FI' and seq == '9211':
-                # OCR misread of TI-9211 on temperature loop 9211
-                loop_key = f"{area}_LOOP_T_{seq}"
+                loop_key = f"LOOP_F_{seq}"
             elif fcode in ('PSE', 'PRV'):
-                loop_key = f"{area}_PSE_{seq}"
+                loop_key = f"PSE_{seq}"
             elif fcode in ('PY', 'TY', 'FY', 'LY'):
-                loop_key = f"{area}_RELAY_{seq}_{sib}"
+                loop_key = f"RELAY_{seq}_{sib}"
             elif fcode in ('XV', 'MOV', 'SDV', 'BDV'):
-                loop_key = f"{area}_XV_{seq}"
+                loop_key = f"XV_{seq}"
             else:
                 var = 'PD' if fcode.startswith('PD') else fcode[0]
-                loop_key = f"{area}_LOOP_{var}_{seq}"
+                loop_key = f"LOOP_{var}_{seq}"
 
             canonical_tag = f"{area}-{fcode}-{seq}{sib}" if area else f"{fcode}-{seq}{sib}"
 
@@ -755,7 +771,14 @@ class CompilerAgent(BaseAgent):
                 existing_item = seen_loops[loop_key]
                 existing_p_score = getattr(existing_item, '_p_score', 10)
                 als = existing_item.aliases or []
-                if p_score > existing_p_score or (p_score == existing_p_score and len(canonical_tag) > len(existing_item.tag)):
+                should_replace = (p_score > existing_p_score)
+                if p_score == existing_p_score:
+                    if not existing_item.tag.startswith('26-') and canonical_tag.startswith('26-'):
+                        should_replace = True
+                    elif len(canonical_tag) > len(existing_item.tag):
+                        should_replace = True
+
+                if should_replace:
                     old_tag = existing_item.tag
                     existing_item.tag = canonical_tag
                     existing_item.type = self._ISA_TYPE_DESC.get(fcode, fcode)
@@ -777,12 +800,14 @@ class CompilerAgent(BaseAgent):
                 else:
                     if tag not in als and tag != existing_item.tag:
                         als.append(tag)
+                    if canonical_tag not in als and canonical_tag != existing_item.tag:
+                        als.append(canonical_tag)
                     existing_item.aliases = als
                     if coords and not existing_item.coordinates:
                         existing_item.coordinates = coords
                     self._record_merge(
                         canonical_tag=existing_item.tag,
-                        merged_tag=tag,
+                        merged_tag=canonical_tag,
                         merge_reason="INSTRUMENT_LOOP_CONSOLIDATION",
                         entity_type="INSTRUMENT",
                     )
@@ -842,14 +867,22 @@ class CompilerAgent(BaseAgent):
 
     def _compile_valves(
         self, texts: List[Dict], symbols: List[Dict],
-        relations: List[Dict], lines: List[LineItem]
+        relations: List[Dict], lines: List[LineItem],
+        existing_equipment: Optional[List[EquipmentItem]] = None,
     ) -> List[ValveItem]:
-        from src.utils.tag_classifier import map_spec_to_rating_class
+        from src.utils.tag_classifier import map_spec_to_rating_class, canonicalize_tag
         from src.utils.tag_stitcher import safe_float
         compiled = []
         seen_canonical: dict = {}  # Deduplicate by canonical key
         compiled_tags = set()
         compiled_coords = []
+
+        existing_equip_tags = set()
+        if existing_equipment:
+            for eq in existing_equipment:
+                existing_equip_tags.add(eq.tag.upper())
+                existing_equip_tags.add(canonicalize_tag(eq.tag))
+                existing_equip_tags.add(re.sub(r'[^A-Z0-9]', '', eq.tag.upper()))
 
         # ── Anchor 1: Tagged Valves (from text recognition) ───────────────────
         valve_tags = [
@@ -869,8 +902,14 @@ class CompilerAgent(BaseAgent):
             if 'PSV' in tag_upper:
                 continue
 
-            # Reject Suction Strainer equipment (CK-911 compiled into equipment)
-            if tag_upper in ('CK-911', '26-CK-911') or re.match(r'^(?:26-)?CK-911\b', tag_upper):
+            # Reject Suction Strainer equipment (CK-\d{3} is suction strainer equipment)
+            if re.match(r'^(?:[0-9]{2,3}-)?CK-\d{3}\b', tag_upper):
+                continue
+
+            # Reject any tag already compiled as equipment
+            if (tag_upper in existing_equip_tags or
+                canonicalize_tag(tag) in existing_equip_tags or
+                re.sub(r'[^A-Z0-9]', '', tag_upper) in existing_equip_tags):
                 continue
 
             # Reject spec fragments (e.g. FV-46)
@@ -918,6 +957,11 @@ class CompilerAgent(BaseAgent):
                         canon_key = f"{area or '26'}_{fcode}_{seq}{sib}"
                     else:
                         canon_key = cleaned_tag
+
+            if (canon_tag.upper() in existing_equip_tags or
+                canonicalize_tag(canon_tag) in existing_equip_tags or
+                re.sub(r'[^A-Z0-9]', '', canon_tag.upper()) in existing_equip_tags):
+                continue
 
             if canon_key in seen_canonical:
                 existing_item = seen_canonical[canon_key]
@@ -1460,25 +1504,64 @@ class CompilerAgent(BaseAgent):
 
             direction = "FROM" if re.search(r'\bFROM\b', val, re.IGNORECASE) else ("TO" if re.search(r'\bTO\b', val, re.IGNORECASE) else None)
 
-            ref_tag = tag
+            ref_tag = None
             context_desc = None
+            ref_type = "EXTERNAL_REFERENCE"
             if m_dir:
                 captured = m_dir.group(2).strip()
-                # Check if captured text contains an embedded equipment/instrument tag (e.g. 26-PIT-9087)
-                m_sub = re.search(r'((?:\d{2}-)?[A-Z]{2,4}-\d{3,5}[A-Z]?)', captured)
-                if m_sub:
-                    ref_tag = m_sub.group(1)
-                    context_desc = captured.replace(ref_tag, '').strip()
+                # Check for identifiable engineering reference:
+                m_tag = re.search(r'((?:\d{2}-)?[A-Z]{2,4}-\d{3,5}[A-Z]?)', captured)
+                m_pipe = re.search(r'(\d+(?:/\d+)?["\']-[A-Z0-9\-_]+)', captured)
+                m_header = re.search(
+                    r'\b(HP\s+FLARE|LP\s+FLARE|CLOSED\s+DRAIN|OPEN\s+DRAIN|HAZ\.\s+OPEN\s+DRAIN|ATMOSPHERE|SUCTION\s+SCRUBBER|'
+                    r'(?:(?:3RD\s+STAGE\s+)?HP\s+GAS(?:\s+(?:LIFT|EXPORT))?(?:\s+COMPRESSOR)?(?:\s+(?:INLET|DISCHARGE|SUCTION))?\s+HEADER)|'
+                    r'(?:LUBE\s+OIL\s+(?:SUPPLY|RETURN))|(?:MOTOR\s+COOLING(?:\s+(?:WATER|RETURN|SUPPLY))?)|(?:BALANCE\s+LINE(?:\s+COOLER)?))\b',
+                    captured, re.IGNORECASE
+                )
+                m_dwg = re.search(r'\b(?:\d{2}-)?\d{5,7}-\d{2,4}\b', captured)
+
+                if m_tag:
+                    ref_tag = m_tag.group(1).upper()
+                    context_desc = captured.replace(m_tag.group(1), '').strip() or None
+                    ref_type = "EXTERNAL_INSTRUMENT" if re.search(r'^[A-Z]{2,4}-', m_tag.group(1)) else "EXTERNAL_EQUIPMENT"
+                elif m_pipe:
+                    ref_tag = m_pipe.group(1).upper()
+                    ref_type = "OFF_SHEET"
+                elif m_header:
+                    ref_tag = m_header.group(1).upper()
+                    ref_type = "HEADER"
+                elif m_dwg:
+                    ref_tag = m_dwg.group(0).upper()
+                    ref_type = "DRAWING_REFERENCE"
+                elif is_callout:
+                    m_sink = re.search(r'\b(HP\s+FLARE|LP\s+FLARE|CLOSED\s+DRAIN|OPEN\s+DRAIN|HAZ\.\s+OPEN\s+DRAIN|ATMOSPHERE|SUCTION\s+SCRUBBER)\b', val, re.IGNORECASE)
+                    if m_sink:
+                        ref_tag = m_sink.group(1).upper()
+                        ref_type = "OFF_SHEET"
+                elif is_ref:
+                    m_t = re.search(r'((?:\d{2}-)?[A-Z]{2,4}-\d{3,5}[A-Z]?)', tag)
+                    if m_t:
+                        ref_tag = m_t.group(1).upper()
                 else:
-                    ref_tag = captured.split('\n')[0].strip()
+                    # Sentence / note fragment without identifiable engineering reference:
+                    # Do NOT promote to ReferenceItem; remains pure NOTE/ANNOTATION
+                    continue
             elif is_callout:
                 m_sink = re.search(r'\b(HP\s+FLARE|LP\s+FLARE|CLOSED\s+DRAIN|OPEN\s+DRAIN|HAZ\.\s+OPEN\s+DRAIN|ATMOSPHERE|SUCTION\s+SCRUBBER)\b', val, re.IGNORECASE)
                 if m_sink:
                     ref_tag = m_sink.group(1).upper()
+                    ref_type = "OFF_SHEET"
+            elif is_ref:
+                m_t = re.search(r'((?:\d{2}-)?[A-Z]{2,4}-\d{3,5}[A-Z]?)', tag)
+                if m_t:
+                    ref_tag = m_t.group(1).upper()
+
+            if not ref_tag:
+                continue
 
             # Clean and validate reference tag
             ref_tag = re.sub(r'^(?:FROM|TO)\s+', '', ref_tag, flags=re.IGNORECASE).strip()
-            if not ref_tag or len(ref_tag) < 3 or ref_tag.upper() in ('THE', 'AND', 'FOR', 'WITH', 'STAGE'):
+            if not ref_tag or len(ref_tag) < 3 or ref_tag.upper() in ('THE', 'AND', 'FOR', 'WITH', 'STAGE', 'NOTE'):
                 continue
 
             clean_ref_key = canonicalize_tag(ref_tag)
@@ -1495,7 +1578,7 @@ class CompilerAgent(BaseAgent):
             compiled.append(ReferenceItem(
                 reference_id=f"REF-{uuid.uuid4().hex[:8].upper()}",
                 referenced_tag=ref_tag,
-                reference_type="OFF_SHEET" if direction in ("FROM", "TO") else "EXTERNAL_REFERENCE",
+                reference_type=ref_type,
                 source_text=val,
                 context=context_desc if context_desc else None,
                 direction=direction,
